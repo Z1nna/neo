@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NeoMarket - Frontend Apps Launcher</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+    }
+
+    .container {
+      max-width: 1000px;
+      width: 100%;
+    }
+
+    .header {
+      text-align: center;
+      color: white;
+      margin-bottom: 3rem;
+    }
+
+    .header h1 {
+      font-size: 2.5rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .header p {
+      font-size: 1.1rem;
+      opacity: 0.9;
+    }
+
+    .apps-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1.5rem;
+    }
+
+    .app-card {
+      background: white;
+      border-radius: 12px;
+      padding: 2rem;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+      text-decoration: none;
+      color: #333;
+      transition: all 0.3s ease;
+      display: flex;
+      flex-direction: column;
+      cursor: pointer;
+    }
+
+    .app-card:hover {
+      transform: translateY(-8px);
+      box-shadow: 0 15px 50px rgba(0,0,0,0.3);
+    }
+
+    .app-icon {
+      font-size: 3rem;
+      margin-bottom: 1rem;
+      text-align: center;
+    }
+
+    .app-name {
+      font-size: 1.3rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+      color: #667eea;
+    }
+
+    .app-description {
+      font-size: 0.9rem;
+      color: #666;
+      margin-bottom: 1rem;
+      flex: 1;
+      line-height: 1.5;
+    }
+
+    .app-port {
+      font-size: 0.8rem;
+      color: #999;
+      background: #f5f5f5;
+      padding: 0.5rem 0.75rem;
+      border-radius: 4px;
+      display: inline-block;
+      margin-bottom: 1rem;
+      font-family: 'Courier New', monospace;
+    }
+
+    .app-link {
+      display: inline-block;
+      background: #667eea;
+      color: white;
+      padding: 0.75rem 1.5rem;
+      border-radius: 6px;
+      text-decoration: none;
+      font-weight: 500;
+      transition: background 0.2s;
+      text-align: center;
+      margin-top: auto;
+    }
+
+    .app-link:hover {
+      background: #5a67d8;
+    }
+
+    .info-box {
+      background: rgba(255,255,255,0.1);
+      color: white;
+      padding: 1.5rem;
+      border-radius: 8px;
+      margin-top: 2rem;
+      border-left: 4px solid white;
+    }
+
+    .info-box h3 {
+      margin-bottom: 0.75rem;
+    }
+
+    .info-box p {
+      font-size: 0.9rem;
+      opacity: 0.9;
+      line-height: 1.6;
+    }
+
+    .setup-commands {
+      background: #1a1a1a;
+      color: #00ff00;
+      padding: 1rem;
+      border-radius: 4px;
+      font-family: 'Courier New', monospace;
+      font-size: 0.85rem;
+      margin-top: 1rem;
+      overflow-x: auto;
+      line-height: 1.6;
+    }
+
+    @media (max-width: 768px) {
+      .header h1 {
+        font-size: 1.8rem;
+      }
+
+      .apps-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>🏪 NeoMarket</h1>
+      <p>Microservices Marketplace - Frontend Applications</p>
+    </div>
+
+    <div class="apps-grid">
+      <!-- Catalog App -->
+      <div class="app-card">
+        <div class="app-icon">🛍️</div>
+        <div class="app-name">Catalog</div>
+        <div class="app-description">Browse products and categories. Search, filter by category, and explore your marketplace inventory.</div>
+        <div class="app-port">Port: 5173</div>
+        <a href="http://localhost:5173" class="app-link">Open App →</a>
+      </div>
+
+      <!-- Cart App -->
+      <div class="app-card">
+        <div class="app-icon">🛒</div>
+        <div class="app-name">Shopping Cart</div>
+        <div class="app-description">Manage your shopping cart, update quantities, and proceed to checkout. Test cart operations.</div>
+        <div class="app-port">Port: 5174</div>
+        <a href="http://localhost:5174" class="app-link">Open App →</a>
+      </div>
+
+      <!-- Orders App -->
+      <div class="app-card">
+        <div class="app-icon">📦</div>
+        <div class="app-name">Orders</div>
+        <div class="app-description">View your orders, track shipments, and manage order status. Cancel pending orders if needed.</div>
+        <div class="app-port">Port: 5175</div>
+        <a href="http://localhost:5175" class="app-link">Open App →</a>
+      </div>
+
+      <!-- B2B Cabinet -->
+      <div class="app-card">
+        <div class="app-icon">🏢</div>
+        <div class="app-name">B2B Cabinet</div>
+        <div class="app-description">Seller dashboard for managing products, inventory, orders, and business metrics. Full product lifecycle management.</div>
+        <div class="app-port">Port: 5176</div>
+        <a href="http://localhost:5176" class="app-link">Open App →</a>
+      </div>
+
+      <!-- Moderation App -->
+      <div class="app-card">
+        <div class="app-icon">🛡️</div>
+        <div class="app-name">Moderation Queue</div>
+        <div class="app-description">Review and moderate content submissions. Approve or reject products, reviews, and user content with reasons.</div>
+        <div class="app-port">Port: 5177</div>
+        <a href="http://localhost:5177" class="app-link">Open App →</a>
+      </div>
+
+      <!-- API Gateway -->
+      <div class="app-card">
+        <div class="app-icon">⚙️</div>
+        <div class="app-name">API Gateway</div>
+        <div class="app-description">Nginx reverse proxy routing all microservices. All APIs available at http://localhost:8888/api/v1/{service}</div>
+        <div class="app-port">Port: 8888</div>
+        <a href="http://localhost:8888" class="app-link">Check Status →</a>
+      </div>
+    </div>
+
+    <!-- Info Box -->
+    <div class="info-box">
+      <h3>🚀 Quick Start</h3>
+      <p>Each app is a standalone Vite + React application. Start developing:</p>
+      <div class="setup-commands">
+cd frontend/apps/catalog<br>
+npm install<br>
+npm run dev<br>
+<br>
+# In another terminal, start other apps:<br>
+cd frontend/apps/cart && npm run dev<br>
+cd frontend/apps/orders && npm run dev<br>
+cd frontend/apps/b2b-cabinet && npm run dev<br>
+cd frontend/apps/moderation && npm run dev
+      </div>
+      <p style="margin-top: 1rem; font-size: 0.85rem;">
+        ℹ️ All apps make requests to http://localhost:8888/api/v1 (API Gateway).<br>
+        Each service responds at: /api/v1/{service-name}/{endpoint}
+      </p>
+    </div>
+  </div>
+</body>
+</html>

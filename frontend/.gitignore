@@ -1,0 +1,30 @@
+# React + Vite
+node_modules/
+dist/
+.env.local
+.env.*.local
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+.cache/
+.next/
+out/
+
+# Dependencies
+package-lock.json
+yarn.lock
+
+# Runtime
+temp/
+tmp/

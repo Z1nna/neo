@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NeoMarket Auth</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="bg-wave"></div>
+  <div class="bg-glow bg-glow-a"></div>
+  <div class="bg-glow bg-glow-b"></div>
+
+  <main class="auth-page">
+    <section class="card auth-shell">
+      <div class="auth-page-head">
+        <div>
+          <p class="eyebrow">NeoMarket Account</p>
+          <h1 id="authPageTitle">Вход в аккаунт</h1>
+          <p id="authPageSubtitle" class="muted">Для входа нужны только почта и пароль.</p>
+        </div>
+        <a href="./index.html" class="btn btn-ghost btn-link">На витрину</a>
+      </div>
+
+      <div class="auth-mode-switch">
+        <button id="switchLoginBtn" type="button" class="btn btn-ghost">Вход</button>
+        <button id="switchRegisterBtn" type="button" class="btn btn-ghost">Регистрация</button>
+      </div>
+
+      <form id="authPageForm" class="auth-page-form">
+        <div class="field slim">
+          <label for="authPageEmailInput">Email</label>
+          <input id="authPageEmailInput" type="email" autocomplete="email" placeholder="buyer@neomarket.local" />
+        </div>
+        <div class="field slim">
+          <label for="authPagePasswordInput">Пароль</label>
+          <input id="authPagePasswordInput" type="password" autocomplete="current-password" placeholder="Введите пароль" />
+        </div>
+
+        <div id="registerOnlyFields" class="register-only-fields">
+          <p class="muted auth-page-note">При регистрации создается покупательский аккаунт. Username будет сгенерирован автоматически из почты.</p>
+        </div>
+
+        <div class="auth-page-actions">
+          <button id="authPageSubmitBtn" type="submit" class="btn btn-primary">Войти</button>
+          <a href="./index.html" class="btn btn-ghost btn-link">Отмена</a>
+        </div>
+      </form>
+
+      <p id="authPageMessage" class="muted"></p>
+    </section>
+  </main>
+
+  <script src="./auth-page.js" type="module"></script>
+</body>
+</html>

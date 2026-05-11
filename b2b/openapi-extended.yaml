@@ -1,0 +1,1347 @@
+openapi: 3.0.3
+info:
+  title: NeoMarket B2B (Seller Cabinet) - Extended
+  version: "2.0.0"
+  description: |
+    Расширенный контракт кабинета продавца: управление товарами, SKU, накладными,
+    отправками, вебхуками, аналитикой и батч-операциями.
+servers:
+  - url: https://api.neomarket.local
+
+tags:
+  - name: Products
+    description: Управление товарами
+  - name: SKU
+    description: Управление SKU
+  - name: Invoices
+    description: Управление накладными
+  - name: Webhooks
+    description: Управление вебхуками
+  - name: Batch Operations
+    description: Массовые операции
+  - name: Analytics
+    description: Аналитика и статистика
+  - name: Shipments
+    description: Управление отправками
+  - name: Dashboard
+    description: Обзор и метрики
+
+security:
+  - BearerAuth: []
+
+paths:
+  # ========================
+  # PRODUCTS (Existing)
+  # ========================
+  /api/v1/products:
+    get:
+      tags: [Products]
+      summary: Получить список товаров продавца
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: category_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [CREATED, ON_MODERATION, MODERATED, BLOCKED]
+        - name: search
+          in: query
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
+      responses:
+        "200":
+          description: Список товаров
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [Products]
+      summary: Создать товар
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProductRequest"
+      responses:
+        "201":
+          description: Товар создан
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Product"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/products/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ProductId"
+    get:
+      tags: [Products]
+      summary: Получить товар со всеми SKU
+      responses:
+        "200":
+          description: Товар найден
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Product"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Products]
+      summary: Изменить товар
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateProductRequest"
+      responses:
+        "200":
+          description: Товар обновлен
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Product"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ========================
+  # BATCH OPERATIONS (NEW)
+  # ========================
+  /api/v1/products/batch-update:
+    post:
+      tags: [Batch Operations]
+      summary: Массовое обновление товаров
+      description: |
+        Обновляет несколько товаров за один запрос.
+        Максимум 100 товаров за раз.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchProductUpdateRequest"
+      responses:
+        "207":
+          description: Частично успешно (Multi-Status)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchOperationResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/prices/batch-set:
+    post:
+      tags: [Batch Operations]
+      summary: Установить цены для нескольких SKU
+      description: Обновляет цены для до 100 SKU одновременно
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchPriceRequest"
+      responses:
+        "207":
+          description: Результаты обновления цен
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchOperationResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/v1/stocks/batch-set:
+    post:
+      tags: [Batch Operations]
+      summary: Установить остатки для нескольких SKU
+      description: Обновляет количество на складе для до 100 SKU
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchStockRequest"
+      responses:
+        "207":
+          description: Результаты обновления остатков
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchOperationResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  # ========================
+  # WEBHOOKS (NEW)
+  # ========================
+  /api/v1/webhooks:
+    get:
+      tags: [Webhooks]
+      summary: Список всех вебхуков продавца
+      responses:
+        "200":
+          description: Список вебхуков
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  webhooks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Webhook"
+    post:
+      tags: [Webhooks]
+      summary: Создать новый вебхук
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWebhookRequest"
+      responses:
+        "201":
+          description: Вебхук создан
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Webhook"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/v1/webhooks/{webhook_id}:
+    get:
+      tags: [Webhooks]
+      summary: Получить информацию о вебхуке
+      parameters:
+        - name: webhook_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Информация о вебхуке
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Webhook"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Webhooks]
+      summary: Обновить вебхук
+      parameters:
+        - name: webhook_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateWebhookRequest"
+      responses:
+        "200":
+          description: Вебхук обновлен
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Webhook"
+    delete:
+      tags: [Webhooks]
+      summary: Удалить вебхук
+      parameters:
+        - name: webhook_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Вебхук удален
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/webhooks/{webhook_id}/test:
+    post:
+      tags: [Webhooks]
+      summary: Протестировать вебхук
+      parameters:
+        - name: webhook_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Тестовое событие отправлено
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ========================
+  # ANALYTICS (NEW)
+  # ========================
+  /api/v1/analytics/sales:
+    get:
+      tags: [Analytics]
+      summary: Статистика по продажам
+      description: Получить данные о продажах за период
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [day, week, month, quarter, year]
+            default: month
+        - name: from_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: to_date
+          in: query
+          schema:
+            type: string
+            format: date
+      responses:
+        "200":
+          description: Данные о продажах
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SalesAnalytics"
+
+  /api/v1/analytics/revenue:
+    get:
+      tags: [Analytics]
+      summary: Финансовые показатели
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [day, week, month, quarter, year]
+            default: month
+      responses:
+        "200":
+          description: Финансовые данные
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RevenueAnalytics"
+
+  /api/v1/analytics/top-products:
+    get:
+      tags: [Analytics]
+      summary: ТОП товаров по продажам
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 10
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [day, week, month]
+            default: month
+      responses:
+        "200":
+          description: Список ТОП товаров
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TopProductsResponse"
+
+  /api/v1/analytics/traffic:
+    get:
+      tags: [Analytics]
+      summary: Аналитика трафика
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [day, week, month]
+            default: week
+      responses:
+        "200":
+          description: Данные о трафике
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrafficAnalytics"
+
+  # ========================
+  # SHIPMENTS (NEW)
+  # ========================
+  /api/v1/shipments:
+    get:
+      tags: [Shipments]
+      summary: Список отправок
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [PENDING, SHIPPED, DELIVERED, CANCELED, RETURNED]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Список отправок
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShipmentListResponse"
+    post:
+      tags: [Shipments]
+      summary: Создать отправку
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateShipmentRequest"
+      responses:
+        "201":
+          description: Отправка создана
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Shipment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/v1/shipments/{shipment_id}:
+    get:
+      tags: [Shipments]
+      summary: Получить информацию об отправке
+      parameters:
+        - name: shipment_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Информация об отправке
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Shipment"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/shipments/{shipment_id}/track:
+    get:
+      tags: [Shipments]
+      summary: Отследить отправку
+      parameters:
+        - name: shipment_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: История отправки
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShipmentTrack"
+
+  # ========================
+  # DASHBOARD (NEW)
+  # ========================
+  /api/v1/dashboard/overview:
+    get:
+      tags: [Dashboard]
+      summary: Обзор основных метрик
+      description: Получить основные KPI для dashboard
+      responses:
+        "200":
+          description: Метрики dashboard
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardOverview"
+
+  /api/v1/dashboard/stats:
+    get:
+      tags: [Dashboard]
+      summary: Детальная статистика
+      responses:
+        "200":
+          description: Детальная статистика
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardStats"
+
+  # ========================
+  # EXISTING ENDPOINTS (SKU, INVOICES)
+  # ========================
+  /api/v1/skus:
+    post:
+      tags: [SKU]
+      summary: Создать SKU
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSkuRequest"
+      responses:
+        "201":
+          description: SKU создан
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Sku"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+    put:
+      tags: [SKU]
+      summary: Изменить SKU
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateSkuRequest"
+      responses:
+        "200":
+          description: SKU обновлен
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Sku"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/invoices:
+    post:
+      tags: [Invoices]
+      summary: Создать накладную
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateInvoiceRequest"
+      responses:
+        "201":
+          description: Накладная создана
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invoice"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/v1/invoices/accept:
+    post:
+      tags: [Invoices]
+      summary: Принять накладную (склад)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AcceptInvoiceRequest"
+      responses:
+        "200":
+          description: Накладная принята, остатки обновлены
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invoice"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT токен продавца
+
+  parameters:
+    ProductId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    BadRequest:
+      description: Невалидный запрос
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: Требуется авторизация
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Сущность не найдена
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    # ========================
+    # Common Schemas
+    # ========================
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: NOT_FOUND
+        message:
+          type: string
+          example: Resource not found
+
+    Category:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+
+    Image:
+      type: object
+      required: [url, ordering]
+      properties:
+        url:
+          type: string
+        ordering:
+          type: integer
+          minimum: 0
+
+    Characteristic:
+      type: object
+      required: [name, value]
+      properties:
+        name:
+          type: string
+        value:
+          type: string
+
+    # ========================
+    # Product Schemas
+    # ========================
+    Sku:
+      type: object
+      required: [id, product_id, name, price, active_quantity]
+      properties:
+        id:
+          type: string
+          format: uuid
+        product_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        price:
+          type: integer
+          minimum: 0
+          description: Цена в копейках
+        active_quantity:
+          type: integer
+          minimum: 0
+        characteristics:
+          type: array
+          items:
+            $ref: "#/components/schemas/Characteristic"
+
+    Product:
+      type: object
+      required: [id, title, description, status, category, images, characteristics, skus]
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+          enum: [CREATED, ON_MODERATION, MODERATED, BLOCKED]
+        category:
+          $ref: "#/components/schemas/Category"
+        images:
+          type: array
+          items:
+            $ref: "#/components/schemas/Image"
+        characteristics:
+          type: array
+          items:
+            $ref: "#/components/schemas/Characteristic"
+        skus:
+          type: array
+          items:
+            $ref: "#/components/schemas/Sku"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ProductListResponse:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Product"
+        total:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 1
+        offset:
+          type: integer
+          minimum: 0
+
+    CreateProductRequest:
+      type: object
+      required: [title, description, category_id]
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        category_id:
+          type: string
+          format: uuid
+        images:
+          type: array
+          items:
+            $ref: "#/components/schemas/Image"
+        characteristics:
+          type: array
+          items:
+            $ref: "#/components/schemas/Characteristic"
+
+    UpdateProductRequest:
+      type: object
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        category_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [CREATED, ON_MODERATION, MODERATED, BLOCKED]
+        images:
+          type: array
+          items:
+            $ref: "#/components/schemas/Image"
+        characteristics:
+          type: array
+          items:
+            $ref: "#/components/schemas/Characteristic"
+
+    CreateSkuRequest:
+      type: object
+      required: [product_id, name, price, active_quantity]
+      properties:
+        product_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        price:
+          type: integer
+          minimum: 0
+        active_quantity:
+          type: integer
+          minimum: 0
+        characteristics:
+          type: array
+          items:
+            $ref: "#/components/schemas/Characteristic"
+
+    UpdateSkuRequest:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        price:
+          type: integer
+          minimum: 0
+        active_quantity:
+          type: integer
+          minimum: 0
+        characteristics:
+          type: array
+          items:
+            $ref: "#/components/schemas/Characteristic"
+
+    # ========================
+    # Invoice Schemas
+    # ========================
+    InvoiceItem:
+      type: object
+      required: [sku_id, quantity]
+      properties:
+        sku_id:
+          type: string
+          format: uuid
+        quantity:
+          type: integer
+          minimum: 1
+
+    CreateInvoiceRequest:
+      type: object
+      required: [seller_id, warehouse_id, items]
+      properties:
+        seller_id:
+          type: string
+          format: uuid
+        warehouse_id:
+          type: string
+          format: uuid
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/InvoiceItem"
+
+    AcceptInvoiceRequest:
+      type: object
+      required: [invoice_id]
+      properties:
+        invoice_id:
+          type: string
+          format: uuid
+
+    Invoice:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        seller_id:
+          type: string
+          format: uuid
+        warehouse_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [PENDING, ACCEPTED, REJECTED]
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/InvoiceItem"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    # ========================
+    # Batch Operation Schemas
+    # ========================
+    BatchProductUpdateRequest:
+      type: object
+      required: [products]
+      properties:
+        products:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            type: object
+            required: [id]
+            properties:
+              id:
+                type: string
+                format: uuid
+              title:
+                type: string
+              description:
+                type: string
+              price:
+                type: integer
+              status:
+                type: string
+                enum: [CREATED, ON_MODERATION, MODERATED, BLOCKED]
+
+    BatchPriceRequest:
+      type: object
+      required: [prices]
+      properties:
+        prices:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            type: object
+            required: [sku_id, price]
+            properties:
+              sku_id:
+                type: string
+                format: uuid
+              price:
+                type: integer
+                minimum: 0
+
+    BatchStockRequest:
+      type: object
+      required: [stocks]
+      properties:
+        stocks:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            type: object
+            required: [sku_id, quantity]
+            properties:
+              sku_id:
+                type: string
+                format: uuid
+              quantity:
+                type: integer
+                minimum: 0
+
+    BatchOperationResult:
+      type: object
+      properties:
+        total:
+          type: integer
+        successful:
+          type: integer
+        failed:
+          type: integer
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              status:
+                type: string
+                enum: [SUCCESS, ERROR]
+              message:
+                type: string
+
+    # ========================
+    # Webhook Schemas
+    # ========================
+    Webhook:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+            enum:
+              - product.created
+              - product.updated
+              - product.blocked
+              - order.status_changed
+              - inventory.updated
+              - moderation.decision_made
+        active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        last_event_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    CreateWebhookRequest:
+      type: object
+      required: [url, events]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: URL для получения событий
+        events:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum:
+              - product.created
+              - product.updated
+              - product.blocked
+              - order.status_changed
+              - inventory.updated
+              - moderation.decision_made
+
+    UpdateWebhookRequest:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+        active:
+          type: boolean
+
+    # ========================
+    # Analytics Schemas
+    # ========================
+    SalesAnalytics:
+      type: object
+      properties:
+        period:
+          type: string
+        from_date:
+          type: string
+          format: date
+        to_date:
+          type: string
+          format: date
+        total_orders:
+          type: integer
+        total_items_sold:
+          type: integer
+        average_order_value:
+          type: integer
+          description: В копейках
+        daily_data:
+          type: array
+          items:
+            type: object
+            properties:
+              date:
+                type: string
+                format: date
+              orders:
+                type: integer
+              items:
+                type: integer
+              revenue:
+                type: integer
+
+    RevenueAnalytics:
+      type: object
+      properties:
+        period:
+          type: string
+        gross_revenue:
+          type: integer
+          description: Без вычета комиссии
+        commission:
+          type: integer
+        net_revenue:
+          type: integer
+          description: К выплате продавцу
+        refunds:
+          type: integer
+        daily_breakdown:
+          type: array
+          items:
+            type: object
+
+    TopProductsResponse:
+      type: object
+      properties:
+        period:
+          type: string
+        products:
+          type: array
+          items:
+            type: object
+            properties:
+              product_id:
+                type: string
+                format: uuid
+              title:
+                type: string
+              units_sold:
+                type: integer
+              revenue:
+                type: integer
+              position:
+                type: integer
+
+    TrafficAnalytics:
+      type: object
+      properties:
+        period:
+          type: string
+        total_views:
+          type: integer
+        unique_visitors:
+          type: integer
+        conversion_rate:
+          type: number
+          format: float
+        click_through_rate:
+          type: number
+          format: float
+        daily_data:
+          type: array
+          items:
+            type: object
+            properties:
+              date:
+                type: string
+              views:
+                type: integer
+              visitors:
+                type: integer
+
+    # ========================
+    # Shipment Schemas
+    # ========================
+    Shipment:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        order_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [PENDING, SHIPPED, DELIVERED, CANCELED, RETURNED]
+        tracking_number:
+          type: string
+          nullable: true
+        carrier:
+          type: string
+        delivery_address:
+          type: object
+          properties:
+            city:
+              type: string
+            street:
+              type: string
+            house:
+              type: string
+        shipped_at:
+          type: string
+          format: date-time
+          nullable: true
+        delivered_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    ShipmentListResponse:
+      type: object
+      properties:
+        shipments:
+          type: array
+          items:
+            $ref: "#/components/schemas/Shipment"
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    CreateShipmentRequest:
+      type: object
+      required: [order_id, carrier]
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        carrier:
+          type: string
+          description: Название курьерской службы
+        tracking_number:
+          type: string
+
+    ShipmentTrack:
+      type: object
+      properties:
+        shipment_id:
+          type: string
+          format: uuid
+        current_status:
+          type: string
+        history:
+          type: array
+          items:
+            type: object
+            properties:
+              status:
+                type: string
+              timestamp:
+                type: string
+                format: date-time
+              location:
+                type: string
+                nullable: true
+              description:
+                type: string
+
+    # ========================
+    # Dashboard Schemas
+    # ========================
+    DashboardOverview:
+      type: object
+      properties:
+        kpi:
+          type: object
+          properties:
+            total_revenue:
+              type: integer
+              description: За месяц (копейки)
+            total_orders:
+              type: integer
+              description: За месяц
+            total_products:
+              type: integer
+            active_products:
+              type: integer
+            pending_orders:
+              type: integer
+            average_rating:
+              type: number
+              format: float
+        recent_orders:
+          type: array
+          maxItems: 5
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              status:
+                type: string
+              created_at:
+                type: string
+                format: date-time
+        top_products:
+          type: array
+          maxItems: 5
+          items:
+            type: object
+            properties:
+              product_id:
+                type: string
+              title:
+                type: string
+              units_sold:
+                type: integer
+
+    DashboardStats:
+      type: object
+      properties:
+        day_revenue:
+          type: integer
+        week_revenue:
+          type: integer
+        month_revenue:
+          type: integer
+        conversion_rate:
+          type: number
+        traffic_today:
+          type: integer
+        new_reviews:
+          type: integer
+        pending_items_in_moderation:
+          type: integer

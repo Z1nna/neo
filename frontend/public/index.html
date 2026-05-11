@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NeoMarket Marketplace</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="bg-wave"></div>
+  <div class="bg-glow bg-glow-a"></div>
+  <div class="bg-glow bg-glow-b"></div>
+
+  <header class="topbar">
+    <div class="brand-wrap">
+      <div class="brand-mark">NM</div>
+      <div class="brand-copy">
+        <h1>NeoMarket</h1>
+        <p>Маркетплейс в одном окне: витрина, оформление, кабинет и отдельный режим модерации</p>
+      </div>
+    </div>
+
+    <div class="card identity-panel role-customer role-moderation">
+      <div class="identity-panel-head">
+        <div>
+          <h2>Аккаунт</h2>
+          <p id="authHint" class="muted">Вход и регистрация теперь открываются на отдельной странице. Для входа нужны только почта и пароль.</p>
+        </div>
+        <div class="auth-actions">
+          <button id="authLoginBtn" type="button" class="btn btn-primary">Войти</button>
+          <button id="authRegisterBtn" type="button" class="btn btn-ghost">Регистрация</button>
+          <button id="authLogoutBtn" type="button" class="btn btn-ghost">Выйти</button>
+          <button id="refreshAll" type="button" class="btn btn-ghost">Обновить данные</button>
+        </div>
+      </div>
+      <p id="authState" class="muted"></p>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button id="tab-home" class="tab active role-customer" data-tab="home">Главная</button>
+    <button id="tab-catalog" class="tab role-customer" data-tab="catalog">Каталог</button>
+    <button id="tab-cart" class="tab role-customer" data-tab="cart">Корзина</button>
+    <button id="tab-checkout" class="tab role-customer" data-tab="checkout">Оформление</button>
+    <button id="tab-account" class="tab role-customer" data-tab="account">Личный кабинет</button>
+    <button id="tab-moderation" class="tab role-moderation" data-tab="moderation">Moderation Desk</button>
+  </nav>
+
+  <main>
+    <section id="home" class="panel active role-customer">
+      <div class="home-layout">
+        <section class="card hero-banner" id="heroBanners"></section>
+
+        <section class="card">
+          <div class="panel-head">
+            <h2>Подборки</h2>
+            <span class="muted">Собраны из cart-service</span>
+          </div>
+          <div id="collectionsGrid" class="collections-grid"></div>
+        </section>
+
+        <section class="card">
+          <div class="panel-head">
+            <h2>Рекомендуем</h2>
+            <button id="reloadHomeProducts" class="btn btn-ghost">Обновить</button>
+          </div>
+          <div id="homeProductsGrid" class="products-grid"></div>
+        </section>
+      </div>
+    </section>
+
+    <section id="catalog" class="panel role-customer">
+      <div class="store-layout store-layout-wide">
+        <aside class="card sidebar">
+          <h2>Фильтры каталога</h2>
+          <div class="field">
+            <label for="searchInput">Поиск</label>
+            <input id="searchInput" type="text" placeholder="Например: наушники" />
+          </div>
+          <div class="field">
+            <label for="categorySelect">Категория</label>
+            <select id="categorySelect">
+              <option value="">Все категории</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="sortSelect">Сортировка</label>
+            <select id="sortSelect">
+              <option value="date_desc">Новые</option>
+              <option value="price_asc">Цена по возрастанию</option>
+              <option value="price_desc">Цена по убыванию</option>
+            </select>
+          </div>
+          <button id="refreshProducts" class="btn btn-primary">Обновить каталог</button>
+        </aside>
+
+        <section class="catalog-area">
+          <div class="catalog-head">
+            <h2>Товары</h2>
+            <span id="productsMeta" class="muted"></span>
+          </div>
+          <div id="productsGrid" class="products-grid"></div>
+        </section>
+
+        <aside class="card product-details-panel">
+          <div class="panel-head">
+            <h2>Карточка товара</h2>
+            <button id="openCatalogFromDetails" class="btn btn-ghost">Сбросить</button>
+          </div>
+          <div id="productDetails" class="product-details muted">Выберите товар, чтобы увидеть галерею, характеристики, рейтинг и Q&A.</div>
+
+          <div class="divider"></div>
+          <h3 class="subhead">Рейтинг и отзывы</h3>
+          <div id="reviewsSummary" class="muted"></div>
+          <div id="reviewsList" class="reviews-list"></div>
+
+          <div class="field">
+            <label for="reviewRating">Ваша оценка</label>
+            <select id="reviewRating">
+              <option value="5">5</option>
+              <option value="4">4</option>
+              <option value="3">3</option>
+              <option value="2">2</option>
+              <option value="1">1</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="reviewText">Текст отзыва</label>
+            <textarea id="reviewText" rows="3" placeholder="Что понравилось или что стоит улучшить"></textarea>
+          </div>
+          <button id="submitReviewBtn" class="btn btn-primary" disabled>Оставить отзыв</button>
+          <p id="reviewMsg" class="muted"></p>
+
+          <div class="divider"></div>
+          <h3 class="subhead">Q&amp;A</h3>
+          <div id="qaList" class="qa-list"></div>
+          <div class="field">
+            <label for="qaQuestionInput">Ваш вопрос о товаре</label>
+            <textarea id="qaQuestionInput" rows="2" placeholder="Например: подходит ли для iOS?" ></textarea>
+          </div>
+          <button id="askQuestionBtn" class="btn btn-ghost" disabled>Задать вопрос</button>
+          <p id="qaMsg" class="muted"></p>
+        </aside>
+      </div>
+    </section>
+
+    <section id="cart" class="panel role-customer">
+      <div class="store-layout">
+        <section class="card cart-main">
+          <div class="cart-head">
+            <h2>Корзина</h2>
+            <button id="clearCart" class="btn btn-ghost">Очистить</button>
+          </div>
+          <div id="cartItems" class="cart-items"></div>
+          <div id="cartSummary" class="cart-summary"></div>
+        </section>
+
+        <section class="card checkout-panel">
+          <h2>Быстрое оформление</h2>
+          <div class="field">
+            <label for="deliveryCity">Город</label>
+            <input id="deliveryCity" type="text" value="Екатеринбург" />
+          </div>
+          <div class="field">
+            <label for="deliveryStreet">Улица</label>
+            <input id="deliveryStreet" type="text" value="Ленина, 1" />
+          </div>
+          <div class="field">
+            <label for="deliveryApartment">Квартира</label>
+            <input id="deliveryApartment" type="text" value="42" />
+          </div>
+          <div class="field">
+            <label for="deliveryComment">Комментарий</label>
+            <textarea id="deliveryComment" rows="2" placeholder="Комментарий к доставке"></textarea>
+          </div>
+          <button id="goCheckoutTabBtn" class="btn btn-primary">Открыть полное оформление</button>
+          <p id="checkoutMsg" class="muted"></p>
+        </section>
+
+        <section class="card cart-side">
+          <h3 class="subhead">Избранное</h3>
+          <div id="favoritesList" class="favorites-list"></div>
+        </section>
+      </div>
+    </section>
+
+    <section id="checkout" class="panel role-customer">
+      <div class="store-layout store-layout-wide">
+        <section class="card">
+          <div class="panel-head">
+            <h2>Страница заказа</h2>
+            <span id="checkoutTotal" class="badge">0 ₽</span>
+          </div>
+
+          <div id="checkoutItems" class="orders-list"></div>
+
+          <div class="divider"></div>
+
+          <div class="field">
+            <label for="promoCodeInput">Промокод</label>
+            <input id="promoCodeInput" type="text" placeholder="WELCOME10" />
+          </div>
+          <div class="auth-actions">
+            <button id="applyPromoBtn" class="btn btn-ghost">Применить промокод</button>
+            <span id="promoResult" class="muted"></span>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="field">
+            <label for="slotCityInput">Город доставки</label>
+            <input id="slotCityInput" type="text" value="Moscow" />
+          </div>
+          <div class="auth-actions">
+            <button id="loadSlotsBtn" class="btn btn-ghost">Загрузить слоты</button>
+          </div>
+          <div class="field">
+            <label for="slotSelect">Слот доставки</label>
+            <select id="slotSelect">
+              <option value="">Сначала загрузите слоты</option>
+            </select>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>Оплата</h2>
+          <p class="muted">Поток: hold -> capture (демо-эмуляция provider).</p>
+          <div id="paymentState" class="profile-info"></div>
+
+          <div class="divider"></div>
+
+          <h2>Подтверждение</h2>
+          <button id="checkoutBtn" class="btn btn-primary">Подтвердить заказ и оплату</button>
+          <p id="checkoutFlowMsg" class="muted"></p>
+        </section>
+
+        <section class="card">
+          <h2>Адресная книга</h2>
+          <div id="addressList" class="orders-list"></div>
+
+          <div class="field">
+            <label for="addressLabelInput">Название адреса</label>
+            <input id="addressLabelInput" type="text" placeholder="Дом" />
+          </div>
+          <div class="field">
+            <label for="addressCityInput">Город</label>
+            <input id="addressCityInput" type="text" placeholder="Екатеринбург" />
+          </div>
+          <div class="field">
+            <label for="addressStreetInput">Улица</label>
+            <input id="addressStreetInput" type="text" placeholder="Ленина, 1" />
+          </div>
+          <div class="field">
+            <label for="addressApartmentInput">Квартира</label>
+            <input id="addressApartmentInput" type="text" placeholder="42" />
+          </div>
+          <button id="saveAddressBtn" class="btn btn-ghost">Сохранить адрес</button>
+          <p id="addressMsg" class="muted"></p>
+        </section>
+      </div>
+    </section>
+
+    <section id="account" class="panel role-customer">
+      <div class="moderation-layout">
+        <div class="card">
+          <div class="panel-head">
+            <h2>Профиль и заказы</h2>
+            <button id="reloadOrdersBtn" class="btn btn-ghost">Обновить заказы</button>
+          </div>
+          <div id="accountAuthPanel" class="account-auth-panel">
+            <p id="accountAuthHint" class="muted">Если вы еще не вошли в аккаунт, откройте страницу авторизации прямо из личного кабинета.</p>
+            <div class="auth-actions account-auth-actions">
+              <button id="accountLoginBtn" type="button" class="btn btn-primary">Войти</button>
+              <button id="accountRegisterBtn" type="button" class="btn btn-ghost">Регистрация</button>
+              <button id="accountLogoutBtn" type="button" class="btn btn-ghost">Выйти из аккаунта</button>
+            </div>
+          </div>
+          <div id="profileInfo" class="profile-info"></div>
+          <div class="divider"></div>
+          <div id="ordersList" class="orders-list"></div>
+        </div>
+
+        <div class="card">
+          <h2>Логистика и возвраты</h2>
+          <div id="shipmentsList" class="orders-list"></div>
+
+          <div class="divider"></div>
+
+          <h2>Сохраненные адреса</h2>
+          <div id="accountAddressList" class="orders-list"></div>
+
+          <div class="divider"></div>
+
+          <h2>Функции кабинета</h2>
+          <ul class="info-list">
+            <li>История заказов и отмена на ранних статусах.</li>
+            <li>Статусы доставок и трекинг событий.</li>
+            <li>Инициация возврата по доставке.</li>
+          </ul>
+          <p id="accountMsg" class="muted"></p>
+        </div>
+      </div>
+    </section>
+
+    <section id="moderation" class="panel role-moderation">
+      <div class="moderation-layout">
+        <div class="card moderation-main">
+          <div class="panel-head">
+            <h2>Очередь модерации</h2>
+            <button id="getNextCard" class="btn btn-primary">Взять следующую карточку</button>
+          </div>
+
+          <div id="moderationCard" class="moderation-card muted">Очередь пока не загружена</div>
+          <div class="decision-grid">
+            <button id="approveBtn" class="btn btn-success" disabled>Одобрить</button>
+            <button id="declineBtn" class="btn btn-danger" disabled>Отклонить</button>
+          </div>
+          <div class="field">
+            <label for="declineReason">Причина блокировки</label>
+            <select id="declineReason"></select>
+          </div>
+          <div class="field">
+            <label for="declineComment">Комментарий продавцу</label>
+            <textarea id="declineComment" rows="3" placeholder="Что нужно исправить"></textarea>
+          </div>
+          <p id="moderationMsg" class="muted"></p>
+        </div>
+
+        <div class="card moderation-side">
+          <h2>Права и поток</h2>
+          <ul class="info-list">
+            <li>Этот раздел доступен только после входа как MODERATOR.</li>
+            <li>Карточки приходят из B2B через Redis Stream.</li>
+            <li>Approve и decline подписываются JWT модератора.</li>
+          </ul>
+
+          <div class="divider"></div>
+          <h2>Q&amp;A модерация</h2>
+          <div class="field">
+            <label for="qaModerationProductId">Product ID (опционально)</label>
+            <input id="qaModerationProductId" type="text" placeholder="фильтр по товару" />
+          </div>
+          <button id="loadQaQueueBtn" class="btn btn-ghost">Загрузить вопросы</button>
+          <div id="qaModerationList" class="qa-list"></div>
+          <div class="field">
+            <label for="qaAnswerInput">Ответ модератора</label>
+            <textarea id="qaAnswerInput" rows="3" placeholder="Введите ответ"></textarea>
+          </div>
+          <button id="submitQaAnswerBtn" class="btn btn-primary" disabled>Ответить на выбранный вопрос</button>
+          <p id="qaModerationMsg" class="muted"></p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <template id="productTemplate">
+    <article class="product-card">
+      <div class="product-top">
+        <span class="badge">Neo Pick</span>
+        <button class="btn btn-ghost favorite-btn">В избранное</button>
+      </div>
+      <h3 class="product-title"></h3>
+      <p class="product-price"></p>
+      <p class="product-meta"></p>
+      <select class="sku-select"></select>
+      <div class="product-actions">
+        <button class="btn btn-primary add-cart-btn">В корзину</button>
+        <button class="btn btn-ghost details-btn">Описание</button>
+      </div>
+    </article>
+  </template>
+
+  <script src="./app.js" type="module"></script>
+</body>
+</html>

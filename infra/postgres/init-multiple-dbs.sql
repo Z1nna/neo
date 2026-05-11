@@ -1,0 +1,12 @@
+CREATE DATABASE catalog_db;
+CREATE DATABASE cart_db;
+CREATE DATABASE orders_db;
+CREATE DATABASE moderation_db;
+CREATE DATABASE b2b_db;
+CREATE DATABASE auth_db;
+CREATE DATABASE payments_db;
+CREATE DATABASE logistics_db;
+CREATE DATABASE reviews_db;
+CREATE DATABASE promo_db;
+CREATE DATABASE antifraud_db;
+

@@ -1,0 +1,14 @@
+{
+  "name": "neomarket-frontends",
+  "version": "0.0.1",
+  "description": "NeoMarket - Microservices Marketplace Frontend Apps",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "install-all": "npm install && npm install --workspace=apps/catalog --workspace=apps/cart --workspace=apps/orders --workspace=apps/b2b-cabinet --workspace=apps/moderation",
+    "dev": "npm run dev --workspace=apps/catalog & npm run dev --workspace=apps/cart & npm run dev --workspace=apps/orders & npm run dev --workspace=apps/b2b-cabinet & npm run dev --workspace=apps/moderation",
+    "build-all": "npm run build --workspace=apps/catalog && npm run build --workspace=apps/cart && npm run build --workspace=apps/orders && npm run build --workspace=apps/b2b-cabinet && npm run build --workspace=apps/moderation"
+  }
+}
