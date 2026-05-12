@@ -10,6 +10,7 @@ from redis import Redis
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../../../'))
 from infra.event_consumer_retry import EventConsumerWithRetry, RetryPolicy
 
+from catalog_api.b2b_projection import sync_product_snapshot
 from catalog_api.models import Category, IntegrationInbox, Product
 
 
@@ -60,23 +61,21 @@ class Command(BaseCommand):
 
         elif source == 'b2b' and event_type in {'PRODUCT_CREATED', 'PRODUCT_UPDATED'}:
             snapshot = payload.get('snapshot_after') or {}
-            category_data = snapshot.get('category') or {}
-            category_id = category_data.get('id')
-            if not category_id:
+            product = sync_product_snapshot(snapshot)
+            if product is None and snapshot.get('deleted'):
                 return
-
-            category, created = Category.objects.get_or_create(
-                id=category_id,
-                defaults={'name': category_data.get('name', 'General'), 'slug': f'cat-{str(category_id)[:8]}'},
-            )
-            product, created = Product.objects.update_or_create(
-                id=snapshot.get('id'),
-                defaults={
-                    'title': snapshot.get('title', ''),
-                    'description': snapshot.get('description', ''),
-                    'status': snapshot.get('status', Product.Status.CREATED),
-                    'category': category,
-                },
-            )
-            action = "Created" if created else "Updated"
-            self.stdout.write(f"{action} product {product.id} in catalog")
+            if product is not None:
+                self.stdout.write(f"Upserted product {product.id} in catalog")
+        elif source == 'b2b' and event_type == 'PRODUCT_DELETED':
+            product_id = payload.get('product_id')
+            if not product_id:
+                return
+            Product.objects.filter(id=product_id).delete()
+            self.stdout.write(f"Deleted product {product_id} from catalog")
+        elif source == 'b2b' and event_type == 'PRODUCT_BLOCKED':
+            product_id = payload.get('product_id')
+            if not product_id:
+                return
+            updated = Product.objects.filter(id=product_id).update(status=Product.Status.BLOCKED)
+            if updated:
+                self.stdout.write(f"Updated product {product_id} status → {Product.Status.BLOCKED}")

@@ -1,6 +1,7 @@
 import uuid
 
 from django.db import models
+from django.db.models import Q
 
 
 class Category(models.Model):
@@ -60,7 +61,13 @@ class ProductImage(models.Model):
 
     class Meta:
         ordering = ["order", "created_at"]
-        unique_together = ("product", "is_main")  # Only one main image per product
+        constraints = [
+            models.UniqueConstraint(
+                fields=["product"],
+                condition=Q(is_main=True),
+                name="uniq_main_image_per_product",
+            )
+        ]
 
     def __str__(self):
         return f"Image for {self.product.title}"

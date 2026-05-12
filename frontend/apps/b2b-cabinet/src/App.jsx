@@ -44,13 +44,17 @@ const EMPTY_PRODUCT_FORM = {
   title: '',
   description: '',
   category_name: '',
+  imagesText: '',
+  characteristicsText: '',
 }
 
 const EMPTY_SKU_FORM = {
   product_id: '',
   name: '',
   price: '',
+  cost_price: '',
   active_quantity: '',
+  imagesText: '',
   characteristicsText: '',
 }
 
@@ -103,6 +107,23 @@ function normalizeArray(value) {
   return Array.isArray(value) ? value : []
 }
 
+function flattenErrorMessages(value) {
+  if (!value) return []
+  if (Array.isArray(value)) return value.flatMap((item) => flattenErrorMessages(item))
+  if (typeof value === 'object') return Object.values(value).flatMap((item) => flattenErrorMessages(item))
+  return [String(value)]
+}
+
+function getApiErrorMessage(payload, status) {
+  const direct = [payload?.message, payload?.detail, payload?.code].find((item) => typeof item === 'string' && item.trim())
+  if (direct) return direct
+
+  const nested = flattenErrorMessages(payload).filter(Boolean)
+  if (nested.length) return nested.join('; ')
+
+  return `Request failed with status ${status}`
+}
+
 function productStock(product) {
   return normalizeArray(product?.skus).reduce((sum, sku) => sum + Number(sku.active_quantity || 0), 0)
 }
@@ -128,6 +149,24 @@ function serializeCharacteristics(items) {
     .join('\n')
 }
 
+function parseImages(text) {
+  return text
+    .split('\n')
+    .map((row) => row.trim())
+    .filter(Boolean)
+    .map((url, index) => ({
+      url,
+      ordering: index,
+    }))
+}
+
+function serializeImages(items) {
+  return normalizeArray(items)
+    .map((item) => item?.url || '')
+    .filter(Boolean)
+    .join('\n')
+}
+
 async function request(path, { sellerId, method = 'GET', body } = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
     method,
@@ -145,7 +184,7 @@ async function request(path, { sellerId, method = 'GET', body } = {}) {
   const payload = contentType.includes('application/json') ? await response.json() : null
 
   if (!response.ok) {
-    const message = payload?.message || `Request failed with status ${response.status}`
+    const message = getApiErrorMessage(payload, response.status)
     throw new Error(message)
   }
 
@@ -194,6 +233,7 @@ function StatusBadge({ status }) {
     ON_MODERATION: 'warning',
     MODERATED: 'success',
     BLOCKED: 'danger',
+    HARD_BLOCKED: 'danger',
     ACCEPTED: 'success',
   }[status] || 'neutral'
 
@@ -260,6 +300,21 @@ export default function App() {
           product_title: product.title,
         }))
       ),
+    [products]
+  )
+
+  const availableInvoiceSkus = useMemo(
+    () =>
+      products
+        .filter((product) => !product.deleted && product.status === 'MODERATED')
+        .flatMap((product) =>
+          normalizeArray(product.skus)
+            .filter((sku) => !sku.deleted)
+            .map((sku) => ({
+              ...sku,
+              product_title: product.title,
+            }))
+        ),
     [products]
   )
 
@@ -470,6 +525,10 @@ export default function App() {
       announce('error', 'Для карточки товара нужны название и категория.')
       return
     }
+    if (parseImages(productForm.imagesText).length === 0) {
+      announce('error', 'Для карточки товара нужен хотя бы один URL изображения.')
+      return
+    }
 
     try {
       await request('/products/', {
@@ -479,6 +538,8 @@ export default function App() {
           title: productForm.title.trim(),
           description: productForm.description.trim(),
           category_name: productForm.category_name.trim(),
+          images: parseImages(productForm.imagesText),
+          characteristics: parseCharacteristics(productForm.characteristicsText),
         },
       })
 
@@ -496,7 +557,8 @@ export default function App() {
       title: product.title,
       description: product.description || '',
       category_name: product.category?.name || '',
-      status: product.status,
+      imagesText: serializeImages(product.images),
+      characteristicsText: serializeCharacteristics(product.characteristics),
     })
   }
 
@@ -511,7 +573,8 @@ export default function App() {
           title: editingProductForm.title.trim(),
           description: editingProductForm.description.trim(),
           category_name: editingProductForm.category_name.trim(),
-          status: editingProductForm.status,
+          images: parseImages(editingProductForm.imagesText),
+          characteristics: parseCharacteristics(editingProductForm.characteristicsText),
         },
       })
 
@@ -563,7 +626,9 @@ export default function App() {
       product_id: product.id,
       name: sku.name,
       price: String(sku.price),
+      cost_price: String(sku.cost_price || 0),
       active_quantity: String(sku.active_quantity),
+      imagesText: serializeImages(sku.images),
       characteristicsText: serializeCharacteristics(sku.characteristics),
     })
   }
@@ -575,17 +640,23 @@ export default function App() {
       announce('error', 'SKU должен быть привязан к товару и иметь название.')
       return
     }
+    if (parseImages(skuForm.imagesText).length === 0) {
+      announce('error', 'Для SKU нужен хотя бы один URL изображения.')
+      return
+    }
 
     const payload = {
-      ...(editingSkuId ? { id: editingSkuId } : { product_id: skuForm.product_id }),
+      ...(editingSkuId ? {} : { product_id: skuForm.product_id }),
       name: skuForm.name.trim(),
       price: Number(skuForm.price || 0),
+      cost_price: Number(skuForm.cost_price || 0),
       active_quantity: Number(skuForm.active_quantity || 0),
+      images: parseImages(skuForm.imagesText),
       characteristics: parseCharacteristics(skuForm.characteristicsText),
     }
 
     try {
-      await request('/skus/', {
+      await request(editingSkuId ? `/skus/${editingSkuId}/` : '/skus/', {
         sellerId,
         method: editingSkuId ? 'PUT' : 'POST',
         body: payload,
@@ -608,7 +679,7 @@ export default function App() {
     if (!window.confirm('Удалить SKU?')) return
 
     try {
-      await request(`/skus/?id=${skuId}`, {
+      await request(`/skus/${skuId}/`, {
         sellerId,
         method: 'DELETE',
       })
@@ -943,6 +1014,24 @@ export default function App() {
               placeholder="Краткое описание карточки товара"
             />
           </label>
+          <label className="wide">
+            <span>Изображения товара</span>
+            <textarea
+              rows="3"
+              value={productForm.imagesText}
+              onChange={(event) => setProductForm((current) => ({ ...current, imagesText: event.target.value }))}
+              placeholder={'https://cdn.example.com/product-main.jpg\nhttps://cdn.example.com/product-side.jpg'}
+            />
+          </label>
+          <label className="wide">
+            <span>Характеристики</span>
+            <textarea
+              rows="3"
+              value={productForm.characteristicsText}
+              onChange={(event) => setProductForm((current) => ({ ...current, characteristicsText: event.target.value }))}
+              placeholder={'Бренд: NeoMarket\nТип: Беспроводные наушники'}
+            />
+          </label>
           <div className="button-row wide">
             <button type="submit" className="primary-btn">Создать карточку</button>
           </div>
@@ -968,6 +1057,7 @@ export default function App() {
               <option value="ON_MODERATION">ON_MODERATION</option>
               <option value="MODERATED">MODERATED</option>
               <option value="BLOCKED">BLOCKED</option>
+              <option value="HARD_BLOCKED">HARD_BLOCKED</option>
             </select>
           </div>
         }
@@ -989,6 +1079,7 @@ export default function App() {
                     <h3>{product.title}</h3>
                     <p className="product-meta">
                       SKU: {normalizeArray(product.skus).length} · Остаток: {productStock(product)} шт. · Обновлено {formatDate(product.updated_at)}
+                      {product.deleted ? ' · Удалён из витрины' : ''}
                     </p>
                   </div>
                   <div className="product-head-side">
@@ -997,17 +1088,39 @@ export default function App() {
                       <button type="button" className="ghost-btn" onClick={() => toggleProductDetails(product)}>
                         {expandedProductId === product.id ? 'Скрыть SKU' : 'SKU и остатки'}
                       </button>
-                      <button type="button" className="ghost-btn" onClick={() => startProductEdit(product)}>
-                        Редактировать
-                      </button>
-                      <button type="button" className="danger-btn" onClick={() => deleteProduct(product.id)}>
-                        Удалить
-                      </button>
+                      {!product.deleted && product.status !== 'HARD_BLOCKED' && (
+                        <button type="button" className="ghost-btn" onClick={() => startProductEdit(product)}>
+                          Редактировать
+                        </button>
+                      )}
+                      {!product.deleted && product.status !== 'HARD_BLOCKED' && (
+                        <button type="button" className="danger-btn" onClick={() => deleteProduct(product.id)}>
+                          Удалить
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
 
                 <p className="product-description">{product.description || 'Описание пока не заполнено.'}</p>
+                {normalizeArray(product.images).length > 0 && (
+                  <p className="product-meta">Изображений: {normalizeArray(product.images).length}</p>
+                )}
+                {(product.blocking_reason || normalizeArray(product.field_reports).length > 0) && (
+                  <div className="inline-panel">
+                    <strong>Причина блокировки</strong>
+                    <p>{product.blocking_reason?.title || 'Есть замечания модерации'}</p>
+                    {normalizeArray(product.field_reports).length > 0 && (
+                      <ul className="info-list">
+                        {product.field_reports.map((report, index) => (
+                          <li key={`${product.id}-report-${index}`}>
+                            <strong>{report.field || 'Поле'}:</strong> {report.message || report.reason || 'Требует исправления'}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
 
                 {editingProductId === product.id && (
                   <form className="form-grid inline-panel" onSubmit={(event) => saveProductEdit(event, product.id)}>
@@ -1025,24 +1138,28 @@ export default function App() {
                         onChange={(event) => setEditingProductForm((current) => ({ ...current, category_name: event.target.value }))}
                       />
                     </label>
-                    <label>
-                      <span>Статус</span>
-                      <select
-                        value={editingProductForm.status}
-                        onChange={(event) => setEditingProductForm((current) => ({ ...current, status: event.target.value }))}
-                      >
-                        <option value="CREATED">CREATED</option>
-                        <option value="ON_MODERATION">ON_MODERATION</option>
-                        <option value="MODERATED">MODERATED</option>
-                        <option value="BLOCKED">BLOCKED</option>
-                      </select>
-                    </label>
                     <label className="wide">
                       <span>Описание</span>
                       <textarea
                         rows="3"
                         value={editingProductForm.description}
                         onChange={(event) => setEditingProductForm((current) => ({ ...current, description: event.target.value }))}
+                      />
+                    </label>
+                    <label className="wide">
+                      <span>Изображения</span>
+                      <textarea
+                        rows="3"
+                        value={editingProductForm.imagesText}
+                        onChange={(event) => setEditingProductForm((current) => ({ ...current, imagesText: event.target.value }))}
+                      />
+                    </label>
+                    <label className="wide">
+                      <span>Характеристики</span>
+                      <textarea
+                        rows="3"
+                        value={editingProductForm.characteristicsText}
+                        onChange={(event) => setEditingProductForm((current) => ({ ...current, characteristicsText: event.target.value }))}
                       />
                     </label>
                     <div className="button-row wide">
@@ -1060,7 +1177,9 @@ export default function App() {
                       <div className="sku-table-head">
                         <span>SKU</span>
                         <span>Цена</span>
+                        <span>Себестоимость</span>
                         <span>Остаток</span>
+                        <span>Резерв</span>
                         <span>Действия</span>
                       </div>
                       {normalizeArray(product.skus).length === 0 ? (
@@ -1076,16 +1195,23 @@ export default function App() {
                               {normalizeArray(sku.characteristics).length > 0 && (
                                 <p>{serializeCharacteristics(sku.characteristics)}</p>
                               )}
+                              {normalizeArray(sku.images).length > 0 && <p>Фото: {normalizeArray(sku.images).length}</p>}
                             </div>
                             <span>{formatMoney(sku.price)}</span>
+                            <span>{formatMoney(sku.cost_price)}</span>
                             <span>{sku.active_quantity} шт.</span>
+                            <span>{sku.reserved_quantity || 0} шт.</span>
                             <div className="button-row compact">
-                              <button type="button" className="ghost-btn" onClick={() => startSkuEdit(product, sku)}>
-                                Изменить
-                              </button>
-                              <button type="button" className="danger-btn" onClick={() => deleteSku(product.id, sku.id)}>
-                                Удалить
-                              </button>
+                              {!product.deleted && product.status !== 'HARD_BLOCKED' && (
+                                <>
+                                  <button type="button" className="ghost-btn" onClick={() => startSkuEdit(product, sku)}>
+                                    Изменить
+                                  </button>
+                                  <button type="button" className="danger-btn" onClick={() => deleteSku(product.id, sku.id)}>
+                                    Удалить
+                                  </button>
+                                </>
+                              )}
                             </div>
                           </div>
                         ))
@@ -1111,12 +1237,30 @@ export default function App() {
                         />
                       </label>
                       <label>
+                        <span>Себестоимость</span>
+                        <input
+                          type="number"
+                          min="0"
+                          value={skuForm.cost_price}
+                          onChange={(event) => setSkuForm((current) => ({ ...current, cost_price: event.target.value, product_id: product.id }))}
+                        />
+                      </label>
+                      <label>
                         <span>Остаток</span>
                         <input
                           type="number"
                           min="0"
                           value={skuForm.active_quantity}
                           onChange={(event) => setSkuForm((current) => ({ ...current, active_quantity: event.target.value, product_id: product.id }))}
+                        />
+                      </label>
+                      <label className="wide">
+                        <span>Изображения SKU</span>
+                        <textarea
+                          rows="3"
+                          value={skuForm.imagesText}
+                          onChange={(event) => setSkuForm((current) => ({ ...current, imagesText: event.target.value, product_id: product.id }))}
+                          placeholder={'https://cdn.example.com/sku-front.jpg\nhttps://cdn.example.com/sku-side.jpg'}
                         />
                       </label>
                       <label className="wide">
@@ -1179,7 +1323,7 @@ export default function App() {
                   onChange={(event) => updateInvoiceRow(index, 'sku_id', event.target.value)}
                 >
                   <option value="">Выберите SKU</option>
-                  {allSkus.map((sku) => (
+                  {availableInvoiceSkus.map((sku) => (
                     <option key={sku.id} value={sku.id}>
                       {sku.product_title} / {sku.name}
                     </option>

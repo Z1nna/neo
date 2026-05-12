@@ -83,4 +83,7 @@ REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 EVENT_STREAM = os.getenv('EVENT_STREAM', 'neomarket.events')
 EVENT_GROUP = os.getenv('EVENT_GROUP', 'catalog')
 EVENT_CONSUMER = os.getenv('EVENT_CONSUMER', 'catalog-1')
+INTERNAL_SERVICE_KEY = os.getenv('INTERNAL_SERVICE_KEY', 'neomarket-internal-key')
+B2B_PRODUCTS_URL = os.getenv('B2B_PRODUCTS_URL', 'http://b2b:8000/api/v1/products')
+B2B_TIMEOUT = float(os.getenv('B2B_TIMEOUT', '5.0'))
 

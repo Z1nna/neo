@@ -81,6 +81,13 @@ SPECTACULAR_SETTINGS = {
 
 CART_VALIDATE_URL = os.getenv('CART_VALIDATE_URL', 'http://cart:8000/api/v1/cart/validate')
 CART_VALIDATE_TIMEOUT = float(os.getenv('CART_VALIDATE_TIMEOUT', '3.0'))
+CATALOG_PRODUCTS_URL = os.getenv('CATALOG_PRODUCTS_URL', 'http://catalog:8000/api/v1/products')
+CATALOG_TIMEOUT = float(os.getenv('CATALOG_TIMEOUT', '3.0'))
+INTERNAL_SERVICE_KEY = os.getenv('INTERNAL_SERVICE_KEY', 'neomarket-internal-key')
+B2B_RESERVE_URL = os.getenv('B2B_RESERVE_URL', 'http://b2b:8000/api/v1/reserve')
+B2B_UNRESERVE_URL = os.getenv('B2B_UNRESERVE_URL', 'http://b2b:8000/api/v1/unreserve')
+B2B_FULFILL_URL = os.getenv('B2B_FULFILL_URL', 'http://b2b:8000/api/v1/fulfill')
+B2B_TIMEOUT = float(os.getenv('B2B_TIMEOUT', '3.0'))
 
 JWT_ALGORITHM = os.getenv('JWT_ALGORITHM', 'HS256')
 JWT_SECRET = os.getenv('JWT_SECRET', SECRET_KEY)

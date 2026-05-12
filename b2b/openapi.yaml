@@ -57,7 +57,7 @@ paths:
           required: false
           schema:
             type: string
-            enum: [CREATED, ON_MODERATION, MODERATED, BLOCKED]
+            enum: [CREATED, ON_MODERATION, MODERATED, BLOCKED, HARD_BLOCKED]
         - name: search
           in: query
           required: false
@@ -173,6 +173,43 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /api/v1/skus/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    put:
+      tags: [SKU]
+      summary: Изменить SKU по идентификатору
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateSkuRequest"
+      responses:
+        "200":
+          description: SKU обновлен
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Sku"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [SKU]
+      summary: Удалить SKU
+      responses:
+        "204":
+          description: SKU удален
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /api/v1/invoices:
     post:
       tags: [Invoices]
@@ -214,6 +251,78 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /api/v1/reserve:
+    post:
+      tags: [SKU]
+      summary: Зарезервировать остатки по SKU
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InventoryOperationRequest"
+      responses:
+        "200":
+          description: Резерв создан
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InventoryOperationResponse"
+
+  /api/v1/unreserve:
+    post:
+      tags: [SKU]
+      summary: Снять резерв по SKU
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InventoryOperationRequest"
+      responses:
+        "200":
+          description: Резерв снят
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InventoryOperationResponse"
+
+  /api/v1/fulfill:
+    post:
+      tags: [SKU]
+      summary: Финально списать резерв после доставки
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FulfillRequest"
+      responses:
+        "200":
+          description: Резерв списан
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InventoryOperationResponse"
+
+  /api/v1/events/moderation:
+    post:
+      tags: [Products]
+      summary: Применить решение модерации к товару
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModerationDecisionEvent"
+      responses:
+        "200":
+          description: Решение модерации применено
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Product"
 
   /api/v1/products/batch-update:
     post:
@@ -659,7 +768,7 @@ components:
 
     Sku:
       type: object
-      required: [id, product_id, name, price, active_quantity]
+      required: [id, product_id, name, price, cost_price, active_quantity, reserved_quantity, images, deleted]
       properties:
         id:
           type: string
@@ -675,17 +784,29 @@ components:
           type: integer
           minimum: 0
           description: Цена в копейках
+        cost_price:
+          type: integer
+          minimum: 0
         active_quantity:
           type: integer
           minimum: 0
+        reserved_quantity:
+          type: integer
+          minimum: 0
+        images:
+          type: array
+          items:
+            $ref: "#/components/schemas/Image"
         characteristics:
           type: array
           items:
             $ref: "#/components/schemas/Characteristic"
+        deleted:
+          type: boolean
 
     Product:
       type: object
-      required: [id, title, description, status, category, images, characteristics, skus, created_at, updated_at]
+      required: [id, title, description, status, category, images, characteristics, skus, skus_count, total_active_quantity, deleted, created_at, updated_at]
       properties:
         id:
           type: string
@@ -696,7 +817,7 @@ components:
           type: string
         status:
           type: string
-          enum: [CREATED, ON_MODERATION, MODERATED, BLOCKED]
+          enum: [CREATED, ON_MODERATION, MODERATED, BLOCKED, HARD_BLOCKED]
         category:
           $ref: "#/components/schemas/Category"
         images:
@@ -711,6 +832,20 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Sku"
+        skus_count:
+          type: integer
+          minimum: 0
+        total_active_quantity:
+          type: integer
+          minimum: 0
+        blocking_reason:
+          nullable: true
+        field_reports:
+          type: array
+          items:
+            type: object
+        deleted:
+          type: boolean
         created_at:
           type: string
           format: date-time
@@ -738,7 +873,7 @@ components:
 
     CreateProductRequest:
       type: object
-      required: [title, description]
+      required: [title, images]
       properties:
         title:
           type: string
@@ -770,9 +905,6 @@ components:
           format: uuid
         category_name:
           type: string
-        status:
-          type: string
-          enum: [CREATED, ON_MODERATION, MODERATED, BLOCKED]
         images:
           type: array
           items:
@@ -784,7 +916,7 @@ components:
 
     CreateSkuRequest:
       type: object
-      required: [product_id, name, price, active_quantity]
+      required: [product_id, name, price, cost_price, active_quantity, images]
       properties:
         product_id:
           type: string
@@ -794,9 +926,16 @@ components:
         price:
           type: integer
           minimum: 0
+        cost_price:
+          type: integer
+          minimum: 0
         active_quantity:
           type: integer
           minimum: 0
+        images:
+          type: array
+          items:
+            $ref: "#/components/schemas/Image"
         characteristics:
           type: array
           items:
@@ -804,7 +943,6 @@ components:
 
     UpdateSkuRequest:
       type: object
-      required: [id]
       properties:
         id:
           type: string
@@ -814,9 +952,16 @@ components:
         price:
           type: integer
           minimum: 0
+        cost_price:
+          type: integer
+          minimum: 0
         active_quantity:
           type: integer
           minimum: 0
+        images:
+          type: array
+          items:
+            $ref: "#/components/schemas/Image"
         characteristics:
           type: array
           items:
@@ -856,6 +1001,80 @@ components:
         invoice_id:
           type: string
           format: uuid
+
+    InventoryOperationItem:
+      type: object
+      required: [sku_id, quantity]
+      properties:
+        sku_id:
+          type: string
+          format: uuid
+        quantity:
+          type: integer
+          minimum: 1
+
+    InventoryOperationRequest:
+      type: object
+      required: [idempotency_key, items]
+      properties:
+        idempotency_key:
+          type: string
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/InventoryOperationItem"
+
+    FulfillRequest:
+      type: object
+      required: [order_id, items]
+      properties:
+        order_id:
+          type: string
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/InventoryOperationItem"
+
+    InventoryOperationResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              sku_id:
+                type: string
+                format: uuid
+              active_quantity:
+                type: integer
+              reserved_quantity:
+                type: integer
+
+    ModerationDecisionEvent:
+      type: object
+      required: [idempotency_key, product_id, status]
+      properties:
+        idempotency_key:
+          type: string
+        product_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [MODERATED, BLOCKED]
+        hard_block:
+          type: boolean
+        blocking_reason:
+          nullable: true
+        field_reports:
+          type: array
+          items:
+            type: object
 
     Invoice:
       type: object

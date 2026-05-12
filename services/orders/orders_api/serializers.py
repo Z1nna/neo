@@ -3,25 +3,15 @@ from rest_framework import serializers
 from .models import Order, OrderItem
 
 
-class MoneySerializer(serializers.Serializer):
-    amount = serializers.IntegerField(min_value=0)
-    currency = serializers.CharField(max_length=8)
-
-
 class OrderItemRequestSerializer(serializers.Serializer):
-    product_id = serializers.UUIDField()
     sku_id = serializers.UUIDField()
     quantity = serializers.IntegerField(min_value=1)
-    unit_price = MoneySerializer()
-    line_total = MoneySerializer()
 
 
 class CreateOrderRequestSerializer(serializers.Serializer):
+    idempotency_key = serializers.UUIDField()
     items = OrderItemRequestSerializer(many=True, min_length=1)
-    total = MoneySerializer()
-    delivery_address = serializers.DictField()
-    payment_method = serializers.ChoiceField(choices=Order.PaymentMethod.choices)
-    comment = serializers.CharField(max_length=500, allow_blank=True, allow_null=True, required=False)
+    delivery_address = serializers.CharField(max_length=500, allow_blank=True, required=False)
 
 
 class CancelOrderRequestSerializer(serializers.Serializer):
@@ -34,38 +24,59 @@ class UpdateOrderStatusRequestSerializer(serializers.Serializer):
 
 
 class OrderItemSerializer(serializers.ModelSerializer):
-    unit_price = serializers.SerializerMethodField()
-    line_total = serializers.SerializerMethodField()
-
     class Meta:
         model = OrderItem
-        fields = ["product_id", "sku_id", "quantity", "unit_price", "line_total"]
+        fields = [
+            "id",
+            "sku_id",
+            "product_id",
+            "product_title",
+            "sku_name",
+            "quantity",
+            "unit_price",
+            "line_total",
+        ]
 
-    def get_unit_price(self, obj) -> dict:
-        return {"amount": obj.unit_price_amount, "currency": obj.unit_price_currency}
+    unit_price = serializers.IntegerField(source="unit_price_amount", read_only=True)
+    line_total = serializers.IntegerField(source="line_total_amount", read_only=True)
 
-    def get_line_total(self, obj) -> dict:
-        return {"amount": obj.line_total_amount, "currency": obj.line_total_currency}
+
+class OrderListItemSerializer(serializers.ModelSerializer):
+    items_count = serializers.SerializerMethodField()
+    total_amount = serializers.IntegerField(read_only=True)
+    status = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Order
+        fields = ["id", "status", "total_amount", "items_count", "created_at", "updated_at"]
+
+    def get_items_count(self, obj) -> int:
+        return obj.items.count()
+
+    def get_status(self, obj) -> str:
+        return "CANCELLED" if obj.status == Order.Status.CANCELED else obj.status
 
 
 class OrderSerializer(serializers.ModelSerializer):
     items = OrderItemSerializer(many=True, read_only=True)
-    total = serializers.SerializerMethodField()
+    total_amount = serializers.IntegerField(read_only=True)
+    status = serializers.SerializerMethodField()
+    delivery_address = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
         fields = [
             "id",
-            "user_id",
             "status",
             "items",
-            "total",
-            "payment_method",
+            "total_amount",
             "delivery_address",
-            "cancel_reason",
             "created_at",
             "updated_at",
         ]
 
-    def get_total(self, obj) -> dict:
-        return {"amount": obj.total_amount, "currency": obj.total_currency}
+    def get_status(self, obj) -> str:
+        return "CANCELLED" if obj.status == Order.Status.CANCELED else obj.status
+
+    def get_delivery_address(self, obj) -> str:
+        return obj.delivery_address

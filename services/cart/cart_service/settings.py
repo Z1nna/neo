@@ -81,6 +81,7 @@ SPECTACULAR_SETTINGS = {
 
 CATALOG_PRODUCTS_URL = os.getenv('CATALOG_PRODUCTS_URL', 'http://catalog:8000/api/v1/products')
 CATALOG_TIMEOUT = float(os.getenv('CATALOG_TIMEOUT', '3.0'))
+INTERNAL_SERVICE_KEY = os.getenv('INTERNAL_SERVICE_KEY', 'neomarket-internal-key')
 
 JWT_ALGORITHM = os.getenv('JWT_ALGORITHM', 'HS256')
 JWT_SECRET = os.getenv('JWT_SECRET', SECRET_KEY)

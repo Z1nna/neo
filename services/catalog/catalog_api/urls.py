@@ -1,6 +1,8 @@
 from django.urls import path
 
 from .views import (
+    BreadcrumbsView,
+    CatalogFacetsView,
     CategoryDetailView,
     CategoryFiltersView,
     CategoryTreeView,
@@ -37,4 +39,8 @@ urlpatterns = [
     path("categories/<uuid:id>/", CategoryDetailView.as_view(), name="categories-detail"),
     path("categories/<uuid:id>/filters", CategoryFiltersView.as_view(), name="categories-filters-no-slash"),
     path("categories/<uuid:id>/filters/", CategoryFiltersView.as_view(), name="categories-filters"),
+    path("catalog/facets", CatalogFacetsView.as_view(), name="catalog-facets-no-slash"),
+    path("catalog/facets/", CatalogFacetsView.as_view(), name="catalog-facets"),
+    path("breadcrumbs", BreadcrumbsView.as_view(), name="breadcrumbs-no-slash"),
+    path("breadcrumbs/", BreadcrumbsView.as_view(), name="breadcrumbs"),
 ]

@@ -4,6 +4,8 @@ import jwt
 import requests
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
+from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from jwt import InvalidTokenError
@@ -11,16 +13,8 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import BannerEvent, Cart, CartItem, Favorite, Subscription
-from .serializers import (
-    AddCartItemRequestSerializer,
-    BannerEventsRequestSerializer,
-    CartItemSerializer,
-    FavoriteListItemSerializer,
-    FavoriteMutationSerializer,
-    SubscribeRequestSerializer,
-    UpdateCartItemRequestSerializer,
-)
+from .models import Banner, BannerEvent, Cart, CartItem, Collection, Favorite, ProductEventInbox, Subscription
+from .serializers import AddCartItemRequestSerializer, BannerEventsRequestSerializer, CartItemSerializer, FavoriteMutationSerializer, SubscribeRequestSerializer, UpdateCartItemRequestSerializer
 
 
 def _parse_uuid(value):
@@ -30,6 +24,18 @@ def _parse_uuid(value):
         return UUID(str(value))
     except (TypeError, ValueError):
         return None
+
+
+def _parse_int(value, default, minimum=None, maximum=None):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    if minimum is not None:
+        parsed = max(minimum, parsed)
+    if maximum is not None:
+        parsed = min(maximum, parsed)
+    return parsed
 
 
 def _error(message, code, http_status):
@@ -63,22 +69,22 @@ def _decode_jwt_payload(token):
 
 
 def _extract_identity(request):
+    session_id = _parse_uuid(request.headers.get("X-Session-Id"))
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         token = auth.split(" ", 1)[1].strip()
         payload = _decode_jwt_payload(token)
         if payload is None:
-            return None, None, True
+            return None, session_id, True
         user_candidate = payload.get("sub") or payload.get("user_id")
         user_id = _parse_uuid(user_candidate)
         if user_id:
-            return user_id, None, False
+            return user_id, session_id, False
 
-        return None, None, True
+        return None, session_id, True
 
-    # Bootstrap compatibility for existing clients.
+    # Backward-compatible bootstrap mode.
     user_id = _parse_uuid(request.headers.get("X-User-Id"))
-    session_id = _parse_uuid(request.headers.get("X-Session-Id"))
     return user_id, session_id, False
 
 
@@ -100,102 +106,220 @@ def _get_user_id_for_favorites(request):
     return user_id, None
 
 
-def _load_catalog_products(limit=60):
+def _catalog_request(params):
     try:
         response = requests.get(
             settings.CATALOG_PRODUCTS_URL,
-            params={"limit": limit, "offset": 0, "sort": "date_desc"},
+            params=params,
+            headers={"X-Service-Key": settings.INTERNAL_SERVICE_KEY},
             timeout=settings.CATALOG_TIMEOUT,
         )
     except requests.RequestException:
-        return []
+        return None, _error("Сервис товаров временно недоступен, попробуйте позже", "B2B_UNAVAILABLE", status.HTTP_503_SERVICE_UNAVAILABLE)
 
     if response.status_code != status.HTTP_200_OK:
-        return []
+        return None, _error("Сервис товаров временно недоступен, попробуйте позже", "B2B_UNAVAILABLE", status.HTTP_503_SERVICE_UNAVAILABLE)
 
     try:
         payload = response.json()
     except ValueError:
-        return []
+        return None, _error("Сервис товаров временно недоступен, попробуйте позже", "B2B_UNAVAILABLE", status.HTTP_503_SERVICE_UNAVAILABLE)
 
-    return payload.get("items", [])
-
-
-HOME_BANNERS = [
-    {
-        "id": "550e8400-e29b-41d4-a716-446655440000",
-        "collection_id": "new-arrivals",
-        "fallback_title": "Новые поступления",
-        "fallback_subtitle": "Свежие товары каталога",
-        "fallback_image": "https://images.unsplash.com/photo-1512436991641-6745cdb1723f?w=1400&q=80&auto=format&fit=crop",
-    },
-    {
-        "id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
-        "collection_id": "best-value",
-        "fallback_title": "Популярное сейчас",
-        "fallback_subtitle": "Подборка актуальных товаров с витрины",
-        "fallback_image": "https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=1400&q=80&auto=format&fit=crop",
-    },
-]
+    return payload.get("items", []), None
 
 
-def _build_collections_from_products(products):
-    in_stock_products = [item for item in products if item.get("in_stock")]
-    fallback_tail = products[:8]
-    return [
-        {
-            "id": "new-arrivals",
-            "title": "Новые поступления",
-            "description": "Самые свежие товары, уже доступные на витрине",
-            "product_ids": [item["id"] for item in products[:8]],
-        },
-        {
-            "id": "best-value",
-            "title": "Популярное сейчас",
-            "description": "Товары, которые чаще всего попадают в пользовательские сценарии",
-            "product_ids": [item["id"] for item in products[8:16] or fallback_tail],
-        },
-        {
-            "id": "ready-to-buy",
-            "title": "Готово к заказу",
-            "description": "Позиции, которые уже есть в наличии",
-            "product_ids": [item["id"] for item in in_stock_products[:8] or fallback_tail],
-        },
-    ]
+def _catalog_products_by_ids(product_ids):
+    if not product_ids:
+        return [], None
+    return _catalog_request({"ids": ",".join(str(item) for item in product_ids)})
 
 
-def _build_home_banners(products, collections):
-    products_by_id = {item["id"]: item for item in products}
-    collections_by_id = {item["id"]: item for item in collections}
-    banners = []
+def _catalog_products_by_sku_ids(sku_ids):
+    if not sku_ids:
+        return [], None
+    return _catalog_request({"sku_ids": ",".join(str(item) for item in sku_ids)})
 
-    for template in HOME_BANNERS:
-        collection = collections_by_id.get(template["collection_id"])
-        product_ids = collection["product_ids"] if collection else []
-        first_product = next((products_by_id[product_id] for product_id in product_ids if product_id in products_by_id), None)
-        image_url = (first_product or {}).get("image") or template["fallback_image"]
-        title = collection["title"] if collection else template["fallback_title"]
-        subtitle = collection["description"] if collection else template["fallback_subtitle"]
-        link = f"/collections/{collection['id']}" if collection else f"/collections/{template['collection_id']}"
-        banners.append(
-            {
-                "id": template["id"],
-                "title": title,
-                "subtitle": subtitle,
-                "image": image_url,
-                "image_url": image_url,
-                "link": link,
-                "target": {"type": "collection", "id": collection["id"] if collection else template["collection_id"]},
-            }
-        )
 
-    return banners
+def _product_map_by_id(products):
+    return {str(product["id"]): product for product in products}
+
+
+def _sku_map(products):
+    result = {}
+    for product in products:
+        for sku in product.get("skus", []):
+            result[str(sku["id"])] = (product, sku)
+    return result
 
 
 def _get_or_create_cart(user_id, session_id):
     if user_id:
         return Cart.objects.get_or_create(user_id=user_id, defaults={"session_id": None})
     return Cart.objects.get_or_create(session_id=session_id, defaults={"user_id": None})
+
+
+def _merge_session_cart_into_user_cart(user_id, session_id):
+    if not user_id or not session_id:
+        return
+    session_cart = Cart.objects.filter(session_id=session_id).first()
+    if not session_cart:
+        return
+    user_cart, _ = Cart.objects.get_or_create(user_id=user_id, defaults={"session_id": None})
+    for guest_item in session_cart.items.all():
+        target_item = user_cart.items.filter(sku_id=guest_item.sku_id).first()
+        if target_item:
+            changed = False
+            merged_quantity = max(target_item.quantity, guest_item.quantity)
+            if target_item.quantity != merged_quantity:
+                target_item.quantity = merged_quantity
+                changed = True
+            if guest_item.product_id and target_item.product_id != guest_item.product_id:
+                target_item.product_id = guest_item.product_id
+                changed = True
+            if changed:
+                target_item.save(update_fields=["quantity", "product_id", "updated_at"])
+        else:
+            guest_item.cart = user_cart
+            guest_item.save(update_fields=["cart"])
+    session_cart.delete()
+
+
+def _effective_cart(user_id, session_id):
+    if user_id and session_id:
+        _merge_session_cart_into_user_cart(user_id, session_id)
+    if user_id:
+        return Cart.objects.filter(user_id=user_id).first()
+    return Cart.objects.filter(session_id=session_id).first()
+
+
+def _serialize_enriched_favorite(favorite, product):
+    return {"product": product, "added_at": favorite.added_at}
+
+
+def _serialize_cart_item(item, product, sku):
+    unavailable_reason = None
+    available_stock = 0
+    unit_price = 0
+    line_total = 0
+    product_title = None
+    sku_name = None
+    image_url = None
+
+    if product and sku:
+        product_title = product.get("title")
+        sku_name = sku.get("name")
+        image_url = sku.get("image") or product.get("images", [{}])[0].get("url") if product.get("images") else sku.get("image")
+        available_stock = int(sku.get("active_quantity") or 0)
+        unit_price = int(sku.get("price") or 0) - int(sku.get("discount") or 0)
+        if available_stock <= 0:
+            unavailable_reason = CartItem.UnavailableReason.OUT_OF_STOCK
+        else:
+            line_total = unit_price * int(item.quantity)
+    else:
+        unavailable_reason = item.unavailable_reason or CartItem.UnavailableReason.PRODUCT_DELETED
+
+    if item.unavailable_reason and unavailable_reason is None:
+        item.unavailable_reason = None
+        item.save(update_fields=["unavailable_reason", "updated_at"])
+    elif unavailable_reason and item.unavailable_reason != unavailable_reason:
+        item.unavailable_reason = unavailable_reason
+        item.save(update_fields=["unavailable_reason", "updated_at"])
+
+    return {
+        "item_id": str(item.id),
+        "product_id": str(item.product_id) if item.product_id else (product.get("id") if product else None),
+        "product_title": product_title,
+        "sku_id": str(item.sku_id),
+        "sku_name": sku_name,
+        "image": image_url,
+        "quantity": item.quantity,
+        "available": unavailable_reason is None,
+        "available_stock": available_stock,
+        "unavailable_reason": unavailable_reason,
+        "unit_price": unit_price,
+        "line_total": line_total,
+        "updated_at": item.updated_at,
+    }
+
+
+def _build_cart_payload(cart):
+    items = list(cart.items.all().order_by("created_at"))
+    if not items:
+        return {
+            "items": [],
+            "summary": {
+                "total_amount": 0,
+                "total_items": 0,
+                "total_quantity": 0,
+                "available_items": 0,
+                "unavailable_count": 0,
+                "has_unavailable_items": False,
+                "checkout_ready": False,
+                "currency": "RUB",
+            },
+            "checkout_payload": {"items": [], "total_amount": 0, "currency": "RUB"},
+        }, None
+
+    products, error = _catalog_products_by_sku_ids([item.sku_id for item in items])
+    if error:
+        return None, error
+    sku_context = _sku_map(products)
+
+    serialized = []
+    total_amount = 0
+    unavailable_count = 0
+    for item in items:
+        product, sku = sku_context.get(str(item.sku_id), (None, None))
+        if product and item.product_id != _parse_uuid(product.get("id")):
+            item.product_id = _parse_uuid(product.get("id"))
+            item.save(update_fields=["product_id", "updated_at"])
+        payload = _serialize_cart_item(item, product, sku)
+        if payload["available"]:
+            total_amount += payload["line_total"]
+        else:
+            unavailable_count += 1
+        if payload["available"] and payload["available_stock"] < payload["quantity"]:
+            unavailable_count += 1
+        serialized.append(payload)
+
+    checkout_items = [
+        {"sku_id": item["sku_id"], "quantity": item["quantity"]}
+        for item in serialized
+        if item["available"] and item["available_stock"] >= item["quantity"]
+    ]
+    total_quantity = sum(item["quantity"] for item in serialized)
+    available_items = sum(1 for item in serialized if item["available"])
+    payload = {
+        "items": serialized,
+        "summary": {
+            "total_amount": total_amount,
+            "total_items": len(serialized),
+            "total_quantity": total_quantity,
+            "available_items": available_items,
+            "unavailable_count": unavailable_count,
+            "has_unavailable_items": unavailable_count > 0,
+            "checkout_ready": bool(checkout_items) and unavailable_count == 0,
+            "currency": "RUB",
+        },
+        "checkout_payload": {"items": checkout_items, "total_amount": total_amount, "currency": "RUB"},
+    }
+    return payload, None
+
+
+def _lookup_visible_sku(sku_id):
+    products, error = _catalog_products_by_sku_ids([sku_id])
+    if error:
+        return None, None, error
+    context = _sku_map(products)
+    product, sku = context.get(str(sku_id), (None, None))
+    return product, sku, None
+
+
+def _require_service_key(request):
+    expected = settings.INTERNAL_SERVICE_KEY
+    if expected and request.headers.get("X-Service-Key") != expected:
+        return _error("Неверный X-Service-Key", "UNAUTHORIZED", status.HTTP_401_UNAUTHORIZED)
+    return None
 
 
 @extend_schema_view(
@@ -208,7 +332,7 @@ class CartView(APIView):
         if error:
             return error
 
-        cart = Cart.objects.filter(user_id=user_id).first() if user_id else Cart.objects.filter(session_id=session_id).first()
+        cart = _effective_cart(user_id, session_id)
         if not cart:
             return Response(
                 {
@@ -226,32 +350,17 @@ class CartView(APIView):
                 }
             )
 
-        items = cart.items.all().order_by("created_at")
-        serialized = CartItemSerializer(items, many=True).data
-        total_quantity = sum(item["quantity"] for item in serialized)
-
-        return Response(
-            {
-                "items": serialized,
-                "summary": {
-                    "total_amount": 0,
-                    "total_items": len(serialized),
-                    "total_quantity": total_quantity,
-                    "available_items": len(serialized),
-                    "has_unavailable_items": False,
-                    "checkout_ready": len(serialized) > 0,
-                    "currency": "RUB",
-                },
-                "checkout_payload": {"items": serialized, "total_amount": 0, "currency": "RUB"},
-            }
-        )
+        payload, error = _build_cart_payload(cart)
+        if error:
+            return error
+        return Response(payload)
 
     def delete(self, request):
         user_id, session_id, error = _get_cart_identity(request)
         if error:
             return error
 
-        cart = Cart.objects.filter(user_id=user_id).first() if user_id else Cart.objects.filter(session_id=session_id).first()
+        cart = _effective_cart(user_id, session_id)
         if cart:
             cart.items.all().delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -270,25 +379,60 @@ class CartItemsView(APIView):
         user_id, session_id, error = _get_cart_identity(request)
         if error:
             return error
+        if user_id and session_id:
+            _merge_session_cart_into_user_cart(user_id, session_id)
 
         serializer = AddCartItemRequestSerializer(data=request.data)
         if not serializer.is_valid():
             return _error("Невалидный запрос", "INVALID_REQUEST", status.HTTP_400_BAD_REQUEST)
 
+        product, sku, lookup_error = _lookup_visible_sku(serializer.validated_data["sku_id"])
+        if lookup_error:
+            return lookup_error
+        if not sku or not product:
+            return _error("SKU не найден или недоступен", "SKU_NOT_FOUND", status.HTTP_404_NOT_FOUND)
+
         cart, _ = _get_or_create_cart(user_id, session_id)
         item, created = CartItem.objects.select_for_update().get_or_create(
             cart=cart,
             sku_id=serializer.validated_data["sku_id"],
-            defaults={"quantity": serializer.validated_data["quantity"]},
+            defaults={
+                "quantity": serializer.validated_data["quantity"],
+                "product_id": _parse_uuid(product.get("id")),
+                "unavailable_reason": None,
+            },
         )
 
+        new_quantity = serializer.validated_data["quantity"] if created else item.quantity + serializer.validated_data["quantity"]
+        available_stock = int(sku.get("active_quantity") or 0)
+        if available_stock < new_quantity:
+            reason = "OUT_OF_STOCK" if available_stock == 0 else "INSUFFICIENT_STOCK"
+            return Response(
+                {
+                    "code": "INSUFFICIENT_STOCK",
+                    "message": "Не удалось добавить товар в корзину",
+                    "failed_items": [
+                        {
+                            "sku_id": str(item.sku_id),
+                            "requested": new_quantity,
+                            "available": available_stock,
+                            "reason": reason,
+                        }
+                    ],
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
         if not created:
-            item.quantity += serializer.validated_data["quantity"]
-            item.save(update_fields=["quantity", "updated_at"])
+            item.quantity = new_quantity
+            item.product_id = _parse_uuid(product.get("id"))
+            item.unavailable_reason = None
+            item.save(update_fields=["quantity", "product_id", "unavailable_reason", "updated_at"])
 
         payload = {
-            "item_id": item.id,
-            "sku_id": item.sku_id,
+            "item_id": str(item.id),
+            "product_id": product.get("id"),
+            "sku_id": str(item.sku_id),
             "quantity": item.quantity,
             "message": "Товар добавлен в корзину" if created else "Количество товара увеличено",
         }
@@ -309,6 +453,8 @@ class CartItemDetailView(APIView):
         user_id, session_id, error = _get_cart_identity(request)
         if error:
             return None, None, error
+        if user_id and session_id:
+            _merge_session_cart_into_user_cart(user_id, session_id)
 
         try:
             item = CartItem.objects.select_related("cart").get(id=item_id)
@@ -316,19 +462,21 @@ class CartItemDetailView(APIView):
             return None, None, _error("Позиция не найдена в корзине", "CART_ITEM_NOT_FOUND", status.HTTP_404_NOT_FOUND)
 
         if user_id and item.cart.user_id != user_id:
-            return None, None, _error("Нет доступа к этой позиции корзины", "ACCESS_DENIED", status.HTTP_403_FORBIDDEN)
+            return None, None, _error("Позиция не найдена в корзине", "CART_ITEM_NOT_FOUND", status.HTTP_404_NOT_FOUND)
         if session_id and item.cart.session_id != session_id:
-            return None, None, _error("Нет доступа к этой позиции корзины", "ACCESS_DENIED", status.HTTP_403_FORBIDDEN)
+            return None, None, _error("Позиция не найдена в корзине", "CART_ITEM_NOT_FOUND", status.HTTP_404_NOT_FOUND)
 
         return item, (user_id, session_id), None
 
     def get(self, request, item_id):
         item, _identity, error = self._resolve_item(request, item_id)
         if error:
-            if error.status_code == status.HTTP_403_FORBIDDEN:
-                return _error("Позиция не найдена в корзине", "CART_ITEM_NOT_FOUND", status.HTTP_404_NOT_FOUND)
             return error
-        return Response(CartItemSerializer(item).data)
+        products, catalog_error = _catalog_products_by_sku_ids([item.sku_id])
+        if catalog_error:
+            return catalog_error
+        product, sku = _sku_map(products).get(str(item.sku_id), (None, None))
+        return Response(_serialize_cart_item(item, product, sku))
 
     @transaction.atomic
     def put(self, request, item_id):
@@ -340,13 +488,40 @@ class CartItemDetailView(APIView):
         if not serializer.is_valid():
             return _error("Невалидный запрос", "INVALID_REQUEST", status.HTTP_400_BAD_REQUEST)
 
+        product, sku, lookup_error = _lookup_visible_sku(item.sku_id)
+        if lookup_error:
+            return lookup_error
+        if not product or not sku:
+            return _error("SKU не найден или недоступен", "SKU_NOT_FOUND", status.HTTP_404_NOT_FOUND)
+        available_stock = int(sku.get("active_quantity") or 0)
+        if available_stock < serializer.validated_data["quantity"]:
+            reason = "OUT_OF_STOCK" if available_stock == 0 else "INSUFFICIENT_STOCK"
+            return Response(
+                {
+                    "code": "INSUFFICIENT_STOCK",
+                    "message": "Не удалось обновить количество",
+                    "failed_items": [
+                        {
+                            "sku_id": str(item.sku_id),
+                            "requested": serializer.validated_data["quantity"],
+                            "available": available_stock,
+                            "reason": reason,
+                        }
+                    ],
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
         item.quantity = serializer.validated_data["quantity"]
-        item.save(update_fields=["quantity", "updated_at"])
+        item.product_id = _parse_uuid(product.get("id"))
+        item.unavailable_reason = None
+        item.save(update_fields=["quantity", "product_id", "unavailable_reason", "updated_at"])
 
         return Response(
             {
-                "item_id": item.id,
-                "sku_id": item.sku_id,
+                "item_id": str(item.id),
+                "product_id": product.get("id"),
+                "sku_id": str(item.sku_id),
                 "quantity": item.quantity,
                 "message": "Количество обновлено",
             }
@@ -355,8 +530,6 @@ class CartItemDetailView(APIView):
     def delete(self, request, item_id):
         item, _identity, error = self._resolve_item(request, item_id)
         if error:
-            if error.status_code == status.HTTP_403_FORBIDDEN:
-                return _error("Позиция не найдена в корзине", "CART_ITEM_NOT_FOUND", status.HTTP_404_NOT_FOUND)
             return error
 
         item.delete()
@@ -383,24 +556,37 @@ class CartValidateView(APIView):
                 }
             )
 
-        items = cart.items.all()
+        payload, build_error = _build_cart_payload(cart)
+        if build_error:
+            return build_error
         issues = []
-        for item in items:
-            if item.quantity < 1:
+        for item in payload["items"]:
+            if item["unavailable_reason"]:
                 issues.append(
                     {
-                        "cart_item_id": str(item.id),
-                        "issue_type": "INVALID_QUANTITY",
+                        "cart_item_id": item["item_id"],
+                        "sku_id": item["sku_id"],
+                        "issue_type": item["unavailable_reason"],
                         "severity": "critical",
-                        "message": "Некорректное количество",
+                        "message": "Товар недоступен для оформления",
+                    }
+                )
+            elif item["available_stock"] < item["quantity"]:
+                issues.append(
+                    {
+                        "cart_item_id": item["item_id"],
+                        "sku_id": item["sku_id"],
+                        "issue_type": "INSUFFICIENT_STOCK",
+                        "severity": "warning",
+                        "message": "Недостаточно остатка для выбранного количества",
                     }
                 )
 
         return Response(
             {
                 "is_valid": len(issues) == 0,
-                "can_checkout": len(items) > 0 and len(issues) == 0,
-                "total_items": len(items),
+                "can_checkout": bool(payload["items"]) and len(issues) == 0,
+                "total_items": len(payload["items"]),
                 "issues": issues,
             }
         )
@@ -421,16 +607,19 @@ class FavoritesView(APIView):
         except ValueError:
             return _error("Параметры limit/offset невалидны", "INVALID_PARAMETER", status.HTTP_400_BAD_REQUEST)
 
-        queryset = Favorite.objects.filter(user_id=user_id).order_by("-added_at")
-        total = queryset.count()
-        items = queryset[offset : offset + limit]
+        queryset = list(Favorite.objects.filter(user_id=user_id).order_by("-added_at")[offset : offset + limit])
+        product_ids = [favorite.product_id for favorite in queryset]
+        products, catalog_error = _catalog_products_by_ids(product_ids)
+        if catalog_error:
+            return catalog_error
+        products_by_id = _product_map_by_id(products)
+        items = [
+            _serialize_enriched_favorite(favorite, products_by_id[str(favorite.product_id)])
+            for favorite in queryset
+            if str(favorite.product_id) in products_by_id
+        ]
 
-        return Response(
-            {
-                "items": FavoriteListItemSerializer(items, many=True).data,
-                "total": total,
-            }
-        )
+        return Response({"items": items, "total_count": len(items), "limit": limit, "offset": offset})
 
 
 @extend_schema_view(
@@ -448,6 +637,12 @@ class FavoriteDetailView(APIView):
         product_uuid = _parse_uuid(product_id)
         if not product_uuid:
             return _error("Некорректный UUID product_id", "INVALID_PARAMETER", status.HTTP_400_BAD_REQUEST)
+
+        products, catalog_error = _catalog_products_by_ids([product_uuid])
+        if catalog_error:
+            return catalog_error
+        if not products:
+            return _error("Товар не найден", "PRODUCT_NOT_FOUND", status.HTTP_404_NOT_FOUND)
 
         favorite, created = Favorite.objects.get_or_create(user_id=user_id, product_id=product_uuid)
         payload = FavoriteMutationSerializer(favorite).data
@@ -475,6 +670,8 @@ class FavoriteDetailView(APIView):
     ),
 )
 class FavoriteSubscribeView(APIView):
+    serializer_class = SubscribeRequestSerializer
+
     def post(self, request, product_id):
         user_id, error = _get_user_id_for_favorites(request)
         if error:
@@ -487,6 +684,12 @@ class FavoriteSubscribeView(APIView):
         serializer = SubscribeRequestSerializer(data=request.data)
         if not serializer.is_valid():
             return _error("Должен быть указан хотя бы один тип уведомления", "INVALID_NOTIFY_ON", status.HTTP_400_BAD_REQUEST)
+
+        products, catalog_error = _catalog_products_by_ids([product_uuid])
+        if catalog_error:
+            return catalog_error
+        if not products:
+            return _error("Товар не найден", "PRODUCT_NOT_FOUND", status.HTTP_404_NOT_FOUND)
 
         exists = Subscription.objects.filter(user_id=user_id, product_id=product_uuid).exists()
         if exists:
@@ -512,6 +715,18 @@ class FavoriteSubscribeView(APIView):
             status=status.HTTP_201_CREATED,
         )
 
+    def delete(self, request, product_id):
+        user_id, error = _get_user_id_for_favorites(request)
+        if error:
+            return error
+
+        product_uuid = _parse_uuid(product_id)
+        if not product_uuid:
+            return _error("Некорректный UUID product_id", "INVALID_PARAMETER", status.HTTP_400_BAD_REQUEST)
+
+        Subscription.objects.filter(user_id=user_id, product_id=product_uuid).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
 
 @extend_schema_view(
     post=extend_schema(operation_id="home_post_banner_events", request=BannerEventsRequestSerializer, responses=None),
@@ -524,7 +739,7 @@ class BannerEventsView(APIView):
             return _error("Массив events не может быть пустым", "EMPTY_EVENTS", status.HTTP_400_BAD_REQUEST)
 
         user_id, _session_id, _token_error = _extract_identity(request)
-        allowed_banner_ids = {item["id"] for item in HOME_BANNERS}
+        allowed_banner_ids = set(str(item) for item in Banner.objects.values_list("id", flat=True))
         rows = []
 
         for event in serializer.validated_data["events"]:
@@ -549,19 +764,24 @@ class BannerEventsView(APIView):
 )
 class MainCollectionsView(APIView):
     def get(self, request):
-        products = _load_catalog_products()
-        collections = _build_collections_from_products(products)
+        limit = max(1, min(_parse_int(request.query_params.get("limit", 10), 10), 100))
+        offset = max(0, _parse_int(request.query_params.get("offset", 0), 0))
+        today = timezone.now().date()
+        queryset = Collection.objects.filter(is_active=True).filter(Q(start_date__isnull=True) | Q(start_date__lte=today)).order_by("priority", "-created_at")
+        total_count = queryset.count()
+        collections = queryset[offset : offset + limit]
         items = [
             {
-                "id": collection["id"],
-                "title": collection["title"],
-                "description": collection["description"],
-                "products_count": len(collection["product_ids"]),
+                "id": str(collection.id),
+                "title": collection.title,
+                "description": collection.description,
+                "cover_image_url": collection.cover_image_url,
+                "target_url": collection.target_url,
+                "products_count": collection.collection_products.count(),
             }
             for collection in collections
-            if collection["product_ids"]
         ]
-        return Response({"items": items})
+        return Response({"items": items, "total_count": total_count, "limit": limit, "offset": offset})
 
 
 @extend_schema_view(
@@ -569,23 +789,33 @@ class MainCollectionsView(APIView):
 )
 class CollectionProductsView(APIView):
     def get(self, request, collection_id):
-        products = _load_catalog_products()
-        by_id = {item["id"]: item for item in products}
-        collections = _build_collections_from_products(products)
-        collection = next((item for item in collections if item["id"] == str(collection_id)), None)
+        collection = Collection.objects.filter(id=collection_id, is_active=True).first()
         if not collection:
             return _error("Подборка не найдена", "NOT_FOUND", status.HTTP_404_NOT_FOUND)
-
-        product_items = [by_id[pid] for pid in collection["product_ids"] if pid in by_id]
+        limit = max(1, min(_parse_int(request.query_params.get("limit", 20), 20), 100))
+        offset = max(0, _parse_int(request.query_params.get("offset", 0), 0))
+        product_links = list(collection.collection_products.all().order_by("ordering", "product_id"))
+        product_ids = [link.product_id for link in product_links]
+        paged_ids = product_ids[offset : offset + limit]
+        products, catalog_error = _catalog_products_by_ids(paged_ids)
+        if catalog_error:
+            return catalog_error
+        products_by_id = _product_map_by_id(products)
+        items = [products_by_id[str(product_id)] for product_id in paged_ids if str(product_id) in products_by_id]
+        unavailable_ids = [str(product_id) for product_id in paged_ids if str(product_id) not in products_by_id]
         return Response(
             {
                 "collection": {
-                    "id": collection["id"],
-                    "title": collection["title"],
-                    "description": collection["description"],
+                    "id": str(collection.id),
+                    "title": collection.title,
+                    "description": collection.description,
+                    "cover_image_url": collection.cover_image_url,
                 },
-                "items": product_items,
-                "total": len(product_items),
+                "items": items,
+                "unavailable_ids": unavailable_ids,
+                "total_count": len(product_ids),
+                "limit": limit,
+                "offset": offset,
             }
         )
 
@@ -595,10 +825,21 @@ class CollectionProductsView(APIView):
 )
 class HomeBannersView(APIView):
     def get(self, request):
-        products = _load_catalog_products()
-        collections = _build_collections_from_products(products)
-        banners = _build_home_banners(products, collections)
-        return Response({"items": banners})
+        now = timezone.now()
+        queryset = Banner.objects.filter(is_active=True).order_by("priority", "-created_at")
+        queryset = queryset.exclude(start_at__gt=now).exclude(end_at__lt=now)
+        items = [
+            {
+                "id": str(banner.id),
+                "title": banner.title,
+                "image_url": banner.image_url,
+                "image": banner.image_url,
+                "link": banner.link,
+                "priority": banner.priority,
+            }
+            for banner in queryset
+        ]
+        return Response({"items": items, "total_count": len(items)})
 
 
 @extend_schema_view(
@@ -606,5 +847,47 @@ class HomeBannersView(APIView):
 )
 class AlsoBoughtView(APIView):
     def get(self, request):
-        products = _load_catalog_products(limit=12)
+        products, error = _catalog_request({"limit": 12, "offset": 0, "sort": "date_desc"})
+        if error:
+            return error
         return Response({"items": products[:6], "total": min(6, len(products))})
+
+
+@extend_schema_view(
+    post=extend_schema(operation_id="cart_process_product_event", request=OpenApiTypes.OBJECT, responses=OpenApiTypes.OBJECT),
+)
+class ProductEventsView(APIView):
+    @transaction.atomic
+    def post(self, request):
+        error = _require_service_key(request)
+        if error:
+            return error
+
+        payload = request.data or {}
+        idempotency_key = str(payload.get("idempotency_key") or "").strip()
+        event = str(payload.get("event") or "").strip()
+        product_id = _parse_uuid(payload.get("product_id"))
+        sku_ids = [_parse_uuid(item) for item in payload.get("sku_ids", [])]
+        if not idempotency_key or not event or not product_id or not sku_ids or any(item is None for item in sku_ids):
+            return _error("Невалидный payload события", "INVALID_REQUEST", status.HTTP_400_BAD_REQUEST)
+
+        if ProductEventInbox.objects.filter(idempotency_key=idempotency_key).exists():
+            return Response({"accepted": True})
+
+        reason_map = {
+            "PRODUCT_BLOCKED": CartItem.UnavailableReason.PRODUCT_BLOCKED,
+            "PRODUCT_DELETED": CartItem.UnavailableReason.PRODUCT_DELETED,
+            "SKU_OUT_OF_STOCK": CartItem.UnavailableReason.OUT_OF_STOCK,
+        }
+        unavailable_reason = reason_map.get(event)
+        if unavailable_reason:
+            CartItem.objects.filter(sku_id__in=sku_ids).update(unavailable_reason=unavailable_reason)
+
+        ProductEventInbox.objects.create(
+            idempotency_key=idempotency_key,
+            event=event,
+            product_id=product_id,
+            sku_ids=[str(item) for item in sku_ids],
+            reason=payload.get("reason"),
+        )
+        return Response({"accepted": True})

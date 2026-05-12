@@ -5,10 +5,14 @@ from .views import (
     DashboardStatsView,
     InvoiceAcceptView,
     InvoicesView,
+    FulfillView,
+    ModerationEventsView,
     ProductDetailView,
     ProductsView,
+    ReserveView,
     SellerProfileView,
     SkuMutationView,
+    UnreserveView,
 )
 
 
@@ -25,8 +29,18 @@ urlpatterns = [
     path('products/<uuid:id>/', ProductDetailView.as_view(), name='b2b-product-detail'),
     path('skus', SkuMutationView.as_view(), name='b2b-skus-no-slash'),
     path('skus/', SkuMutationView.as_view(), name='b2b-skus'),
+    path('skus/<uuid:id>', SkuMutationView.as_view(), name='b2b-sku-detail-no-slash'),
+    path('skus/<uuid:id>/', SkuMutationView.as_view(), name='b2b-sku-detail'),
     path('invoices', InvoicesView.as_view(), name='b2b-invoices-no-slash'),
     path('invoices/', InvoicesView.as_view(), name='b2b-invoices'),
     path('invoices/accept', InvoiceAcceptView.as_view(), name='b2b-invoices-accept-no-slash'),
     path('invoices/accept/', InvoiceAcceptView.as_view(), name='b2b-invoices-accept'),
+    path('reserve', ReserveView.as_view(), name='b2b-reserve-no-slash'),
+    path('reserve/', ReserveView.as_view(), name='b2b-reserve'),
+    path('unreserve', UnreserveView.as_view(), name='b2b-unreserve-no-slash'),
+    path('unreserve/', UnreserveView.as_view(), name='b2b-unreserve'),
+    path('fulfill', FulfillView.as_view(), name='b2b-fulfill-no-slash'),
+    path('fulfill/', FulfillView.as_view(), name='b2b-fulfill'),
+    path('events/moderation', ModerationEventsView.as_view(), name='b2b-events-moderation-no-slash'),
+    path('events/moderation/', ModerationEventsView.as_view(), name='b2b-events-moderation'),
 ]

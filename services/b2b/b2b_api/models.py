@@ -28,6 +28,7 @@ class Product(models.Model):
         ON_MODERATION = 'ON_MODERATION', 'ON_MODERATION'
         MODERATED = 'MODERATED', 'MODERATED'
         BLOCKED = 'BLOCKED', 'BLOCKED'
+        HARD_BLOCKED = 'HARD_BLOCKED', 'HARD_BLOCKED'
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     seller_id = models.UUIDField(db_index=True)
@@ -37,6 +38,9 @@ class Product(models.Model):
     category = models.ForeignKey(Category, related_name='products', on_delete=models.PROTECT)
     images = models.JSONField(default=list, blank=True)
     characteristics = models.JSONField(default=list, blank=True)
+    deleted = models.BooleanField(default=False, db_index=True)
+    blocking_reason = models.JSONField(default=None, null=True, blank=True)
+    field_reports = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -52,8 +56,12 @@ class Sku(models.Model):
     product = models.ForeignKey(Product, related_name='skus', on_delete=models.CASCADE)
     name = models.CharField(max_length=255)
     price = models.BigIntegerField()
+    cost_price = models.BigIntegerField(default=0)
     active_quantity = models.IntegerField(default=0)
+    reserved_quantity = models.IntegerField(default=0)
+    images = models.JSONField(default=list, blank=True)
     characteristics = models.JSONField(default=list, blank=True)
+    deleted = models.BooleanField(default=False, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -103,6 +111,18 @@ class IntegrationInbox(models.Model):
     event_type = models.CharField(max_length=64)
     payload = models.JSONField(default=dict)
     received_at = models.DateTimeField(auto_now_add=True)
+
+
+class InventoryOperation(models.Model):
+    class Kind(models.TextChoices):
+        RESERVE = 'RESERVE', 'RESERVE'
+        UNRESERVE = 'UNRESERVE', 'UNRESERVE'
+        FULFILL = 'FULFILL', 'FULFILL'
+
+    key = models.CharField(max_length=128, primary_key=True)
+    kind = models.CharField(max_length=16, choices=Kind.choices)
+    payload = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
 
 
 class SellerProfile(models.Model):

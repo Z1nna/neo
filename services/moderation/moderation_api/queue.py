@@ -27,7 +27,12 @@ def parse_event(message_fields: dict) -> dict:
 
     payload = _parse_event_payload(normalized)
     product_id = normalized.get("product_id") or payload.get("product_id")
-    event_type = (normalized.get("event_type") or payload.get("event_type") or "UPDATED").upper()
+    raw_event_type = normalized.get("event_type")
+    payload_event_type = payload.get("event_type")
+    if raw_event_type in {"PRODUCT_CREATED", "PRODUCT_UPDATED", "PRODUCT_DELETED"} and payload_event_type:
+        event_type = str(payload_event_type).upper()
+    else:
+        event_type = (raw_event_type or payload_event_type or "UPDATED").upper()
 
     snapshot_before = payload.get("snapshot_before")
     snapshot_after = payload.get("snapshot_after")
@@ -70,10 +75,18 @@ def enqueue_from_event(event: dict):
         return None
 
     event_type = event.get("event_type", "UPDATED")
+    if event_type == "DELETED":
+        ModerationCard.objects.filter(product_id=product_id, queue_status__in=[
+            ModerationCard.QueueStatus.PENDING,
+            ModerationCard.QueueStatus.IN_REVIEW,
+        ]).delete()
+        return None
     if event_type not in {ModerationCard.EventType.CREATED, ModerationCard.EventType.UPDATED}:
         event_type = ModerationCard.EventType.UPDATED
 
     snapshot_after = event.get("snapshot_after") or fetch_b2b_snapshot(product_id) or {"id": str(product_id)}
+    if event_type == ModerationCard.EventType.CREATED and not (snapshot_after.get("skus") or []):
+        return None
 
     return ModerationCard.objects.create(
         product_id=product_id,

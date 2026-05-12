@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import jwt
 from django.conf import settings
@@ -12,16 +12,30 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Category, IntegrationOutbox, Invoice, InvoiceItem, Product, SellerProfile, Sku
+from .models import (
+    Category,
+    IntegrationInbox,
+    IntegrationOutbox,
+    InventoryOperation,
+    Invoice,
+    InvoiceItem,
+    Product,
+    SellerProfile,
+    Sku,
+)
 from .serializers import (
     AcceptInvoiceRequestSerializer,
+    CatalogProductSerializer,
     CreateInvoiceRequestSerializer,
     CreateProductRequestSerializer,
     CreateSkuRequestSerializer,
     DashboardOverviewSerializer,
     DashboardStatsSerializer,
+    FulfillRequestSerializer,
     InvoiceSerializer,
+    ModerationDecisionSerializer,
     ProductSerializer,
+    ReserveRequestSerializer,
     SellerProfileSerializer,
     SellerProfileUpdateSerializer,
     SkuSerializer,
@@ -69,6 +83,11 @@ def _decode_token(token):
         return None
 
 
+def _looks_like_seller_request(request):
+    auth_header = request.headers.get('Authorization', '')
+    return auth_header.startswith('Bearer ') or bool(request.headers.get('X-Seller-Id') or request.headers.get('X-User-Id'))
+
+
 def _get_seller_id(request):
     auth_header = request.headers.get('Authorization', '')
     if auth_header.startswith('Bearer '):
@@ -82,11 +101,25 @@ def _get_seller_id(request):
             return seller_id, None
         return None, _error('UNAUTHORIZED', 'JWT does not contain seller id', status.HTTP_401_UNAUTHORIZED)
 
-    # Local bootstrap compatibility for internal testing.
     seller_id = _parse_uuid(request.headers.get('X-Seller-Id') or request.headers.get('X-User-Id'))
     if seller_id:
         return seller_id, None
     return None, _error('UNAUTHORIZED', 'Seller identity is required', status.HTTP_401_UNAUTHORIZED)
+
+
+def _expected_service_key():
+    return getattr(settings, 'INTERNAL_SERVICE_KEY', 'neomarket-internal-key')
+
+
+def _service_key_is_valid(request):
+    provided = (request.headers.get('X-Service-Key') or '').strip()
+    return bool(provided) and provided == _expected_service_key()
+
+
+def _require_service_key(request):
+    if _service_key_is_valid(request):
+        return None
+    return _error('UNAUTHORIZED', 'Missing or invalid X-Service-Key', status.HTTP_401_UNAUTHORIZED)
 
 
 def _outbox_event(aggregate_id, event_type, payload):
@@ -102,14 +135,7 @@ def _resolve_category(validated_data):
     category_name = (validated_data.get('category_name') or '').strip()
 
     if category_id:
-        category, _ = Category.objects.get_or_create(
-            id=category_id,
-            defaults={'name': category_name or 'General'},
-        )
-        if category_name and category.name != category_name:
-            category.name = category_name
-            category.save(update_fields=['name'])
-        return category
+        return Category.objects.filter(id=category_id).first()
 
     existing = Category.objects.filter(name__iexact=category_name).first()
     if existing:
@@ -127,6 +153,68 @@ def _get_or_create_profile(seller_id):
     )[0]
 
 
+def _serialize_product_snapshot(product):
+    return ProductSerializer(product).data
+
+
+def _clear_blocking_state(product):
+    product.blocking_reason = None
+    product.field_reports = []
+
+
+def _send_product_event(product, event_name, lifecycle_event, snapshot_before=None, extra=None):
+    payload = {
+        'product_id': str(product.id),
+        'event_type': lifecycle_event,
+        'idempotency_key': str(uuid4()),
+        'snapshot_after': _serialize_product_snapshot(product),
+    }
+    if snapshot_before is not None:
+        payload['snapshot_before'] = snapshot_before
+    if extra:
+        payload.update(extra)
+    _outbox_event(product.id, event_name, payload)
+
+
+def _send_sku_stock_event(sku, event_name='SKU_OUT_OF_STOCK'):
+    _outbox_event(
+        sku.product_id,
+        event_name,
+        {
+            'event_type': event_name,
+            'idempotency_key': str(uuid4()),
+            'product_id': str(sku.product_id),
+            'sku_id': str(sku.id),
+        },
+    )
+
+
+def _set_product_on_moderation(product, snapshot_before=None, lifecycle_event='EDITED'):
+    product.status = Product.Status.ON_MODERATION
+    _clear_blocking_state(product)
+    product.save(update_fields=['status', 'blocking_reason', 'field_reports', 'updated_at'])
+    _send_product_event(product, 'PRODUCT_UPDATED', lifecycle_event, snapshot_before=snapshot_before)
+
+
+def _inventory_operation_response(items, message):
+    return {
+        'items': items,
+        'message': message,
+    }
+
+
+def _annotated_seller_products_queryset(seller_id):
+    return (
+        Product.objects.filter(seller_id=seller_id)
+        .select_related('category')
+        .prefetch_related('skus')
+        .annotate(
+            skus_count=Count('skus', filter=Q(skus__deleted=False), distinct=True),
+            total_active_quantity=Sum('skus__active_quantity', filter=Q(skus__deleted=False)),
+        )
+    )
+
+
 @extend_schema_view(
     get=extend_schema(operation_id='b2b_dashboard_overview', responses=DashboardOverviewSerializer),
 )
@@ -137,16 +225,16 @@ class DashboardOverviewView(APIView):
             return error
 
         products = Product.objects.filter(seller_id=seller_id)
-        skus = Sku.objects.filter(product__seller_id=seller_id)
+        skus = Sku.objects.filter(product__seller_id=seller_id, deleted=False)
         invoices = Invoice.objects.filter(seller_id=seller_id)
 
         overview = {
             'total_products': products.count(),
             'total_skus': skus.count(),
             'total_stock': skus.aggregate(total=Sum('active_quantity'))['total'] or 0,
-            'created_products': products.filter(status=Product.Status.CREATED).count(),
-            'on_moderation_products': products.filter(status=Product.Status.ON_MODERATION).count(),
-            'blocked_products': products.filter(status=Product.Status.BLOCKED).count(),
+            'created_products': products.filter(status=Product.Status.CREATED, deleted=False).count(),
+            'on_moderation_products': products.filter(status=Product.Status.ON_MODERATION, deleted=False).count(),
+            'blocked_products': products.filter(status__in=[Product.Status.BLOCKED, Product.Status.HARD_BLOCKED], deleted=False).count(),
             'pending_invoices': invoices.filter(status=Invoice.Status.CREATED).count(),
             'accepted_invoices': invoices.filter(status=Invoice.Status.ACCEPTED).count(),
         }
@@ -162,19 +250,15 @@ class DashboardStatsView(APIView):
         if error:
             return error
 
-        products = Product.objects.filter(seller_id=seller_id).select_related('category').prefetch_related('skus')
+        products = _annotated_seller_products_queryset(seller_id)
         low_stock_skus = (
             Sku.objects.select_related('product')
-            .filter(product__seller_id=seller_id, active_quantity__lte=5)
+            .filter(product__seller_id=seller_id, active_quantity__lte=5, deleted=False)
             .order_by('active_quantity', 'name')[:8]
         )
         recent_products = products.order_by('-created_at')[:5]
         recent_invoices = Invoice.objects.filter(seller_id=seller_id).prefetch_related('items__sku').order_by('-created_at')[:5]
-        status_rows = (
-            products.values('status')
-            .annotate(value=Count('id'))
-            .order_by('status')
-        )
+        status_rows = products.values('status').annotate(value=Count('id')).order_by('status')
 
         return Response(
             {
@@ -222,6 +306,12 @@ class SellerProfileView(APIView):
 )
 class ProductsView(APIView):
     def get(self, request):
+        if not _looks_like_seller_request(request):
+            error = _require_service_key(request)
+            if error:
+                return error
+            return self._catalog_view(request)
+
         seller_id, error = _get_seller_id(request)
         if error:
             return error
@@ -232,7 +322,7 @@ class ProductsView(APIView):
         except ValueError:
             return _error('BAD_REQUEST', 'Invalid pagination params', status.HTTP_400_BAD_REQUEST)
 
-        queryset = Product.objects.filter(seller_id=seller_id).select_related('category').prefetch_related('skus')
+        queryset = _annotated_seller_products_queryset(seller_id)
 
         category_id = request.query_params.get('category_id')
         if category_id:
@@ -258,6 +348,45 @@ class ProductsView(APIView):
             }
         )
 
+    def _catalog_view(self, request):
+        try:
+            limit = max(1, min(int(request.query_params.get('limit', 20)), 100))
+            offset = max(0, int(request.query_params.get('offset', 0)))
+        except ValueError:
+            return _error('BAD_REQUEST', 'Invalid pagination params', status.HTTP_400_BAD_REQUEST)
+
+        queryset = (
+            Product.objects.filter(
+                status=Product.Status.MODERATED,
+                deleted=False,
+                skus__deleted=False,
+                skus__active_quantity__gt=0,
+            )
+            .select_related('category')
+            .prefetch_related('skus')
+            .distinct()
+        )
+
+        ids_param = request.query_params.get('ids')
+        if ids_param:
+            raw_ids = [item.strip() for item in ids_param.split(',') if item.strip()]
+            parsed_ids = [_parse_uuid(item) for item in raw_ids]
+            if any(item is None for item in parsed_ids):
+                return _error('BAD_REQUEST', 'Invalid ids filter', status.HTTP_400_BAD_REQUEST)
+            queryset = queryset.filter(id__in=parsed_ids)
+
+        total = queryset.count()
+        items = queryset[offset : offset + limit]
+
+        return Response(
+            {
+                'items': CatalogProductSerializer(items, many=True).data,
+                'total': total,
+                'limit': limit,
+                'offset': offset,
+            }
+        )
+
     @transaction.atomic
     def post(self, request):
         seller_id, error = _get_seller_id(request)
@@ -266,9 +395,11 @@ class ProductsView(APIView):
 
         serializer = CreateProductRequestSerializer(data=request.data)
         if not serializer.is_valid():
-            return _error('BAD_REQUEST', 'Invalid create payload', status.HTTP_400_BAD_REQUEST)
+            return _error('BAD_REQUEST', serializer.errors, status.HTTP_400_BAD_REQUEST)
 
         category = _resolve_category(serializer.validated_data)
+        if category is None:
+            return _error('BAD_REQUEST', {'category_id': ['Unknown category_id.']}, status.HTTP_400_BAD_REQUEST)
 
         product = Product.objects.create(
             seller_id=seller_id,
@@ -278,16 +409,7 @@ class ProductsView(APIView):
             images=serializer.validated_data.get('images', []),
             characteristics=serializer.validated_data.get('characteristics', []),
         )
-        _outbox_event(
-            product.id,
-            'PRODUCT_CREATED',
-            {
-                'product_id': str(product.id),
-                'event_type': 'CREATED',
-                'snapshot_after': ProductSerializer(product).data,
-            },
-        )
-
+        _send_product_event(product, 'PRODUCT_CREATED', 'CREATED')
         return Response(ProductSerializer(product).data, status=status.HTTP_201_CREATED)
 
 
@@ -316,30 +438,38 @@ class ProductDetailView(APIView):
 
         serializer = UpdateProductRequestSerializer(data=request.data)
         if not serializer.is_valid():
-            return _error('BAD_REQUEST', 'Invalid update payload', status.HTTP_400_BAD_REQUEST)
+            return _error('BAD_REQUEST', serializer.errors, status.HTTP_400_BAD_REQUEST)
 
-        product = Product.objects.filter(id=id, seller_id=seller_id).first()
+        product = Product.objects.select_related('category').prefetch_related('skus').filter(id=id).first()
         if not product:
             return _error('NOT_FOUND', 'Product not found', status.HTTP_404_NOT_FOUND)
+        if product.seller_id != seller_id:
+            return _error('FORBIDDEN', 'Cannot update another seller product', status.HTTP_403_FORBIDDEN)
+        if product.deleted:
+            return _error('BAD_REQUEST', 'Deleted product cannot be edited', status.HTTP_400_BAD_REQUEST)
+        if product.status == Product.Status.HARD_BLOCKED:
+            return _error('FORBIDDEN', 'HARD_BLOCKED product cannot be edited', status.HTTP_403_FORBIDDEN)
+
+        snapshot_before = _serialize_product_snapshot(product)
+        previous_status = product.status
 
         if 'category_id' in serializer.validated_data or 'category_name' in serializer.validated_data:
             category = _resolve_category(serializer.validated_data)
+            if category is None:
+                return _error('BAD_REQUEST', {'category_id': ['Unknown category_id.']}, status.HTTP_400_BAD_REQUEST)
             product.category = category
 
-        for field in ['title', 'description', 'status', 'images', 'characteristics']:
+        for field in ['title', 'description', 'images', 'characteristics']:
             if field in serializer.validated_data:
                 setattr(product, field, serializer.validated_data[field])
 
         product.save()
-        _outbox_event(
-            product.id,
-            'PRODUCT_UPDATED',
-            {
-                'product_id': str(product.id),
-                'event_type': 'UPDATED',
-                'snapshot_after': ProductSerializer(product).data,
-            },
-        )
+
+        if previous_status in {Product.Status.MODERATED, Product.Status.BLOCKED}:
+            _set_product_on_moderation(product, snapshot_before=snapshot_before, lifecycle_event='EDITED')
+        else:
+            _send_product_event(product, 'PRODUCT_UPDATED', 'EDITED', snapshot_before=snapshot_before)
+
         return Response(ProductSerializer(product).data)
 
     @transaction.atomic
@@ -348,10 +478,43 @@ class ProductDetailView(APIView):
         if error:
             return error
 
-        deleted, _ = Product.objects.filter(id=id, seller_id=seller_id).delete()
-        if not deleted:
+        product = Product.objects.prefetch_related('skus').filter(id=id).first()
+        if not product:
             return _error('NOT_FOUND', 'Product not found', status.HTTP_404_NOT_FOUND)
-        _outbox_event(id, 'PRODUCT_DELETED', {'product_id': str(id), 'event_type': 'DELETED'})
+        if product.seller_id != seller_id:
+            return _error('FORBIDDEN', 'Cannot delete another seller product', status.HTTP_403_FORBIDDEN)
+        if product.status == Product.Status.HARD_BLOCKED:
+            return _error('FORBIDDEN', 'HARD_BLOCKED product cannot be deleted', status.HTTP_403_FORBIDDEN)
+        if product.deleted:
+            return _error('BAD_REQUEST', 'Product is already deleted', status.HTTP_400_BAD_REQUEST)
+
+        snapshot_before = _serialize_product_snapshot(product)
+        sku_ids = [str(sku_id) for sku_id in product.skus.filter(deleted=False).values_list('id', flat=True)]
+        product.deleted = True
+        product.save(update_fields=['deleted', 'updated_at'])
+
+        _outbox_event(
+            product.id,
+            'PRODUCT_UPDATED',
+            {
+                'product_id': str(product.id),
+                'event_type': 'DELETED',
+                'idempotency_key': str(uuid4()),
+                'snapshot_before': snapshot_before,
+                'snapshot_after': _serialize_product_snapshot(product),
+            },
+        )
+        _outbox_event(
+            product.id,
+            'PRODUCT_DELETED',
+            {
+                'product_id': str(product.id),
+                'event_type': 'DELETED',
+                'idempotency_key': str(uuid4()),
+                'sku_ids': sku_ids,
+                'snapshot_before': snapshot_before,
+            },
+        )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -369,58 +532,110 @@ class SkuMutationView(APIView):
 
         serializer = CreateSkuRequestSerializer(data=request.data)
         if not serializer.is_valid():
-            return _error('BAD_REQUEST', 'Invalid SKU payload', status.HTTP_400_BAD_REQUEST)
+            return _error('BAD_REQUEST', serializer.errors, status.HTTP_400_BAD_REQUEST)
 
-        product = Product.objects.filter(id=serializer.validated_data['product_id'], seller_id=seller_id).first()
+        product = Product.objects.select_related('category').prefetch_related('skus').filter(id=serializer.validated_data['product_id']).first()
         if not product:
             return _error('NOT_FOUND', 'Product not found', status.HTTP_404_NOT_FOUND)
+        if product.seller_id != seller_id:
+            return _error('FORBIDDEN', 'Cannot add SKU to another seller product', status.HTTP_403_FORBIDDEN)
+        if product.deleted:
+            return _error('BAD_REQUEST', 'Cannot add SKU to deleted product', status.HTTP_400_BAD_REQUEST)
+        if product.status == Product.Status.HARD_BLOCKED:
+            return _error('FORBIDDEN', 'Cannot add SKU to HARD_BLOCKED product', status.HTTP_403_FORBIDDEN)
+
+        first_live_sku = not product.skus.filter(deleted=False).exists()
+        snapshot_before = _serialize_product_snapshot(product)
 
         sku = Sku.objects.create(
             product=product,
             name=serializer.validated_data['name'],
             price=serializer.validated_data['price'],
+            cost_price=serializer.validated_data.get('cost_price', 0),
             active_quantity=serializer.validated_data['active_quantity'],
+            images=serializer.validated_data.get('images', []),
             characteristics=serializer.validated_data.get('characteristics', []),
         )
+
+        if first_live_sku:
+            _set_product_on_moderation(product, snapshot_before=snapshot_before, lifecycle_event='CREATED')
+
         return Response(SkuSerializer(sku).data, status=status.HTTP_201_CREATED)
 
     @transaction.atomic
-    def put(self, request):
+    def put(self, request, id=None):
         seller_id, error = _get_seller_id(request)
         if error:
             return error
 
         serializer = UpdateSkuRequestSerializer(data=request.data)
         if not serializer.is_valid():
-            return _error('BAD_REQUEST', 'Invalid SKU update payload', status.HTTP_400_BAD_REQUEST)
+            return _error('BAD_REQUEST', serializer.errors, status.HTTP_400_BAD_REQUEST)
 
-        sku = Sku.objects.select_related('product').filter(id=serializer.validated_data['id']).first()
-        if not sku or sku.product.seller_id != seller_id:
+        sku_id = id or serializer.validated_data.get('id')
+        if not sku_id:
+            return _error('BAD_REQUEST', {'id': ['SKU id is required.']}, status.HTTP_400_BAD_REQUEST)
+
+        sku = Sku.objects.select_related('product').prefetch_related('product__skus').filter(id=sku_id).first()
+        if not sku or sku.deleted:
             return _error('NOT_FOUND', 'SKU not found', status.HTTP_404_NOT_FOUND)
+        if sku.product.seller_id != seller_id:
+            return _error('FORBIDDEN', 'Cannot update another seller SKU', status.HTTP_403_FORBIDDEN)
+        if sku.product.status == Product.Status.HARD_BLOCKED:
+            return _error('FORBIDDEN', 'HARD_BLOCKED product cannot be edited', status.HTTP_403_FORBIDDEN)
 
-        for field in ['name', 'price', 'active_quantity', 'characteristics']:
+        snapshot_before = _serialize_product_snapshot(sku.product)
+        previous_status = sku.product.status
+
+        for field in ['name', 'price', 'cost_price', 'active_quantity', 'images', 'characteristics']:
             if field in serializer.validated_data:
                 setattr(sku, field, serializer.validated_data[field])
 
         sku.save()
+
+        if previous_status in {Product.Status.MODERATED, Product.Status.BLOCKED}:
+            _set_product_on_moderation(sku.product, snapshot_before=snapshot_before, lifecycle_event='EDITED')
+        else:
+            _send_product_event(sku.product, 'PRODUCT_UPDATED', 'EDITED', snapshot_before=snapshot_before)
+
         return Response(SkuSerializer(sku).data)
 
     @transaction.atomic
-    def delete(self, request):
+    def delete(self, request, id=None):
         seller_id, error = _get_seller_id(request)
         if error:
             return error
 
-        sku_id = request.query_params.get('id')
-        parsed_id = _parse_uuid(sku_id)
+        parsed_id = id or _parse_uuid(request.query_params.get('id'))
         if not parsed_id:
-            return _error('BAD_REQUEST', 'SKU id query parameter is required', status.HTTP_400_BAD_REQUEST)
+            return _error('BAD_REQUEST', 'SKU id is required', status.HTTP_400_BAD_REQUEST)
 
-        sku = Sku.objects.select_related('product').filter(id=parsed_id).first()
-        if not sku or sku.product.seller_id != seller_id:
+        sku = Sku.objects.select_related('product').prefetch_related('product__skus').filter(id=parsed_id).first()
+        if not sku or sku.deleted:
             return _error('NOT_FOUND', 'SKU not found', status.HTTP_404_NOT_FOUND)
+        if sku.product.seller_id != seller_id:
+            return _error('FORBIDDEN', 'Cannot delete another seller SKU', status.HTTP_403_FORBIDDEN)
+        if sku.product.status == Product.Status.HARD_BLOCKED:
+            return _error('FORBIDDEN', 'HARD_BLOCKED product cannot be edited', status.HTTP_403_FORBIDDEN)
+        if int(sku.reserved_quantity or 0) > 0:
+            return _error('CONFLICT', 'SKU has active reserves', status.HTTP_409_CONFLICT)
 
-        sku.delete()
+        snapshot_before = _serialize_product_snapshot(sku.product)
+        had_stock = sku.product.status == Product.Status.MODERATED and int(sku.active_quantity or 0) > 0
+
+        sku.deleted = True
+        sku.active_quantity = 0
+        sku.save(update_fields=['deleted', 'active_quantity', 'updated_at'])
+
+        if had_stock:
+            _send_sku_stock_event(sku)
+
+        has_other_live_skus = sku.product.skus.filter(deleted=False).exclude(id=sku.id).exists()
+        if not has_other_live_skus and sku.product.status == Product.Status.ON_MODERATION:
+            sku.product.status = Product.Status.CREATED
+            sku.product.save(update_fields=['status', 'updated_at'])
+            _send_product_event(sku.product, 'PRODUCT_UPDATED', 'DELETED', snapshot_before=snapshot_before)
+
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -445,31 +660,35 @@ class InvoicesView(APIView):
 
         serializer = CreateInvoiceRequestSerializer(data=request.data)
         if not serializer.is_valid():
-            return _error('BAD_REQUEST', 'Invalid invoice payload', status.HTTP_400_BAD_REQUEST)
+            return _error('BAD_REQUEST', serializer.errors, status.HTTP_400_BAD_REQUEST)
 
         if serializer.validated_data.get('seller_id') and serializer.validated_data['seller_id'] != seller_id:
             return _error('FORBIDDEN', 'seller_id in payload must match authenticated seller', status.HTTP_403_FORBIDDEN)
+
+        sku_ids = [row['sku_id'] for row in serializer.validated_data['items']]
+        skus = {
+            sku.id: sku
+            for sku in Sku.objects.select_related('product').filter(id__in=sku_ids, deleted=False)
+        }
+
+        rows = []
+        for item in serializer.validated_data['items']:
+            sku = skus.get(item['sku_id'])
+            if not sku:
+                return _error('BAD_REQUEST', 'Invoice contains unknown sku', status.HTTP_400_BAD_REQUEST)
+            if sku.product.seller_id != seller_id:
+                return _error('FORBIDDEN', 'Invoice contains foreign sku', status.HTTP_403_FORBIDDEN)
+            if sku.product.deleted or sku.product.status != Product.Status.MODERATED:
+                return _error('BAD_REQUEST', 'Invoice accepts only MODERATED seller skus', status.HTTP_400_BAD_REQUEST)
+            rows.append((sku, item['quantity']))
 
         invoice = Invoice.objects.create(
             seller_id=seller_id,
             warehouse_id=serializer.validated_data['warehouse_id'],
             status=Invoice.Status.CREATED,
         )
-
-        sku_ids = [row['sku_id'] for row in serializer.validated_data['items']]
-        sku_by_id = {
-            sku.id: sku
-            for sku in Sku.objects.select_related('product').filter(id__in=sku_ids, product__seller_id=seller_id)
-        }
-
-        rows = []
-        for item in serializer.validated_data['items']:
-            sku = sku_by_id.get(item['sku_id'])
-            if not sku:
-                return _error('BAD_REQUEST', 'Invoice contains foreign sku', status.HTTP_400_BAD_REQUEST)
-            rows.append(InvoiceItem(invoice=invoice, sku=sku, quantity=item['quantity']))
-
-        InvoiceItem.objects.bulk_create(rows)
+        InvoiceItem.objects.bulk_create([InvoiceItem(invoice=invoice, sku=sku, quantity=quantity) for sku, quantity in rows])
+        invoice.refresh_from_db()
         return Response(InvoiceSerializer(invoice).data, status=status.HTTP_201_CREATED)
 
 
@@ -485,7 +704,7 @@ class InvoiceAcceptView(APIView):
 
         serializer = AcceptInvoiceRequestSerializer(data=request.data)
         if not serializer.is_valid():
-            return _error('BAD_REQUEST', 'Invalid accept payload', status.HTTP_400_BAD_REQUEST)
+            return _error('BAD_REQUEST', serializer.errors, status.HTTP_400_BAD_REQUEST)
 
         invoice = Invoice.objects.select_for_update().filter(id=serializer.validated_data['invoice_id'], seller_id=seller_id).first()
         if not invoice:
@@ -507,5 +726,213 @@ class InvoiceAcceptView(APIView):
             'INVOICE_ACCEPTED',
             {'invoice_id': str(invoice.id), 'seller_id': str(invoice.seller_id), 'event_type': 'ACCEPTED'},
         )
-
         return Response(InvoiceSerializer(invoice).data)
+
+
+class ReserveView(APIView):
+    @transaction.atomic
+    def post(self, request):
+        error = _require_service_key(request)
+        if error:
+            return error
+
+        serializer = ReserveRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return _error('BAD_REQUEST', serializer.errors, status.HTTP_400_BAD_REQUEST)
+
+        key = serializer.validated_data['idempotency_key']
+        existing = InventoryOperation.objects.filter(key=key).first()
+        if existing:
+            if existing.kind != InventoryOperation.Kind.RESERVE:
+                return _error('CONFLICT', 'Idempotency key already used by another operation', status.HTTP_409_CONFLICT)
+            return Response(existing.payload)
+
+        requested_items = serializer.validated_data['items']
+        sku_ids = [row['sku_id'] for row in requested_items]
+        sku_map = {
+            sku.id: sku
+            for sku in Sku.objects.select_for_update().select_related('product').filter(id__in=sku_ids, deleted=False).order_by('id')
+        }
+        if len(sku_map) != len(set(sku_ids)):
+            return _error('BAD_REQUEST', 'One or more SKU ids are invalid', status.HTTP_400_BAD_REQUEST)
+
+        response_items = []
+        for item in requested_items:
+            sku = sku_map[item['sku_id']]
+            if sku.product.deleted or sku.product.status != Product.Status.MODERATED:
+                return _error('BAD_REQUEST', 'Only MODERATED SKUs can be reserved', status.HTTP_400_BAD_REQUEST)
+            if int(sku.active_quantity or 0) < item['quantity']:
+                return _error('CONFLICT', 'Insufficient stock for reserve', status.HTTP_409_CONFLICT)
+
+        for item in requested_items:
+            sku = sku_map[item['sku_id']]
+            sku.active_quantity -= item['quantity']
+            sku.reserved_quantity += item['quantity']
+            sku.save(update_fields=['active_quantity', 'reserved_quantity', 'updated_at'])
+            if sku.active_quantity == 0:
+                _send_sku_stock_event(sku)
+            response_items.append(
+                {
+                    'sku_id': str(sku.id),
+                    'active_quantity': sku.active_quantity,
+                    'reserved_quantity': sku.reserved_quantity,
+                }
+            )
+
+        payload = _inventory_operation_response(response_items, 'Inventory reserved')
+        InventoryOperation.objects.create(key=key, kind=InventoryOperation.Kind.RESERVE, payload=payload)
+        return Response(payload)
+
+
+class UnreserveView(APIView):
+    @transaction.atomic
+    def post(self, request):
+        error = _require_service_key(request)
+        if error:
+            return error
+
+        serializer = ReserveRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return _error('BAD_REQUEST', serializer.errors, status.HTTP_400_BAD_REQUEST)
+
+        key = serializer.validated_data['idempotency_key']
+        existing = InventoryOperation.objects.filter(key=key).first()
+        if existing:
+            if existing.kind != InventoryOperation.Kind.UNRESERVE:
+                return _error('CONFLICT', 'Idempotency key already used by another operation', status.HTTP_409_CONFLICT)
+            return Response(existing.payload)
+
+        requested_items = serializer.validated_data['items']
+        sku_ids = [row['sku_id'] for row in requested_items]
+        sku_map = {
+            sku.id: sku
+            for sku in Sku.objects.select_for_update().select_related('product').filter(id__in=sku_ids, deleted=False).order_by('id')
+        }
+        if len(sku_map) != len(set(sku_ids)):
+            return _error('BAD_REQUEST', 'One or more SKU ids are invalid', status.HTTP_400_BAD_REQUEST)
+
+        response_items = []
+        for item in requested_items:
+            sku = sku_map[item['sku_id']]
+            if int(sku.reserved_quantity or 0) < item['quantity']:
+                return _error('CONFLICT', 'Cannot unreserve more than reserved quantity', status.HTTP_409_CONFLICT)
+
+        for item in requested_items:
+            sku = sku_map[item['sku_id']]
+            sku.active_quantity += item['quantity']
+            sku.reserved_quantity -= item['quantity']
+            sku.save(update_fields=['active_quantity', 'reserved_quantity', 'updated_at'])
+            response_items.append(
+                {
+                    'sku_id': str(sku.id),
+                    'active_quantity': sku.active_quantity,
+                    'reserved_quantity': sku.reserved_quantity,
+                }
+            )
+
+        payload = _inventory_operation_response(response_items, 'Inventory unreserved')
+        InventoryOperation.objects.create(key=key, kind=InventoryOperation.Kind.UNRESERVE, payload=payload)
+        return Response(payload)
+
+
+class FulfillView(APIView):
+    @transaction.atomic
+    def post(self, request):
+        error = _require_service_key(request)
+        if error:
+            return error
+
+        serializer = FulfillRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return _error('BAD_REQUEST', serializer.errors, status.HTTP_400_BAD_REQUEST)
+
+        key = f'FULFILL:{serializer.validated_data["order_id"]}'
+        existing = InventoryOperation.objects.filter(key=key).first()
+        if existing:
+            if existing.kind != InventoryOperation.Kind.FULFILL:
+                return _error('CONFLICT', 'Order already processed by another operation', status.HTTP_409_CONFLICT)
+            return Response(existing.payload)
+
+        requested_items = serializer.validated_data['items']
+        sku_ids = [row['sku_id'] for row in requested_items]
+        sku_map = {
+            sku.id: sku
+            for sku in Sku.objects.select_for_update().select_related('product').filter(id__in=sku_ids, deleted=False).order_by('id')
+        }
+        if len(sku_map) != len(set(sku_ids)):
+            return _error('BAD_REQUEST', 'One or more SKU ids are invalid', status.HTTP_400_BAD_REQUEST)
+
+        response_items = []
+        for item in requested_items:
+            sku = sku_map[item['sku_id']]
+            if int(sku.reserved_quantity or 0) < item['quantity']:
+                return _error('CONFLICT', 'Cannot fulfill more than reserved quantity', status.HTTP_409_CONFLICT)
+
+        for item in requested_items:
+            sku = sku_map[item['sku_id']]
+            sku.reserved_quantity -= item['quantity']
+            sku.save(update_fields=['reserved_quantity', 'updated_at'])
+            response_items.append(
+                {
+                    'sku_id': str(sku.id),
+                    'active_quantity': sku.active_quantity,
+                    'reserved_quantity': sku.reserved_quantity,
+                }
+            )
+
+        payload = _inventory_operation_response(response_items, 'Fulfill applied')
+        InventoryOperation.objects.create(key=key, kind=InventoryOperation.Kind.FULFILL, payload=payload)
+        return Response(payload)
+
+
+class ModerationEventsView(APIView):
+    @transaction.atomic
+    def post(self, request):
+        error = _require_service_key(request)
+        if error:
+            return error
+
+        serializer = ModerationDecisionSerializer(data=request.data)
+        if not serializer.is_valid():
+            return _error('BAD_REQUEST', serializer.errors, status.HTTP_400_BAD_REQUEST)
+
+        event_key = serializer.validated_data['idempotency_key']
+        existing = IntegrationInbox.objects.filter(message_id=event_key).first()
+        if existing:
+            product = Product.objects.filter(id=serializer.validated_data['product_id']).select_related('category').prefetch_related('skus').first()
+            return Response(ProductSerializer(product).data if product else {'message': 'Event already processed'})
+
+        product = Product.objects.select_related('category').prefetch_related('skus').filter(id=serializer.validated_data['product_id']).first()
+        if not product:
+            return _error('NOT_FOUND', 'Product not found', status.HTTP_404_NOT_FOUND)
+
+        if serializer.validated_data['status'] == Product.Status.MODERATED:
+            product.status = Product.Status.MODERATED
+            _clear_blocking_state(product)
+        else:
+            product.status = Product.Status.HARD_BLOCKED if serializer.validated_data.get('hard_block') else Product.Status.BLOCKED
+            product.blocking_reason = serializer.validated_data.get('blocking_reason') or {'title': 'Moderation blocked the product'}
+            product.field_reports = serializer.validated_data.get('field_reports', [])
+            _outbox_event(
+                product.id,
+                'PRODUCT_BLOCKED',
+                {
+                    'product_id': str(product.id),
+                    'event_type': 'PRODUCT_BLOCKED',
+                    'idempotency_key': str(uuid4()),
+                    'sku_ids': [str(sku_id) for sku_id in product.skus.filter(deleted=False).values_list('id', flat=True)],
+                    'hard_block': product.status == Product.Status.HARD_BLOCKED,
+                },
+            )
+
+        product.save(update_fields=['status', 'blocking_reason', 'field_reports', 'updated_at'])
+        IntegrationInbox.objects.create(
+            message_id=event_key,
+            source='moderation',
+            event_type=str(serializer.validated_data['status']),
+            payload={
+                **serializer.validated_data,
+                'product_id': str(serializer.validated_data['product_id']),
+            },
+        )
+        return Response(ProductSerializer(product).data)

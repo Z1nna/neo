@@ -1,44 +1,77 @@
 import uuid
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
+import jwt
+from django.conf import settings
 from django.test import TestCase
 from rest_framework.test import APIClient
+
+from orders_api.models import Order
+
+
+def _jwt_for_user(user_id, is_admin=False):
+    payload = {
+        "sub": str(user_id),
+        "exp": datetime.now(timezone.utc) + timedelta(hours=1),
+        "roles": ["ADMIN"] if is_admin else ["CUSTOMER"],
+    }
+    if settings.JWT_ISSUER:
+        payload["iss"] = settings.JWT_ISSUER
+    if settings.JWT_AUDIENCE:
+        payload["aud"] = settings.JWT_AUDIENCE
+    return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
 
 class OrdersApiTests(TestCase):
     def setUp(self):
         self.client = APIClient()
         self.user_id = uuid.uuid4()
-        self.base_headers = {"HTTP_X_USER_ID": str(self.user_id)}
+        self.auth = f"Bearer {_jwt_for_user(self.user_id)}"
+        self.admin_auth = f"Bearer {_jwt_for_user(self.user_id, is_admin=True)}"
+        self.sku_id = uuid.uuid4()
+        self.product_id = uuid.uuid4()
 
     def _order_payload(self):
         return {
-            "items": [
-                {
-                    "product_id": str(uuid.uuid4()),
-                    "sku_id": str(uuid.uuid4()),
-                    "quantity": 1,
-                    "unit_price": {"amount": 10000, "currency": "RUB"},
-                    "line_total": {"amount": 10000, "currency": "RUB"},
-                }
-            ],
-            "total": {"amount": 10000, "currency": "RUB"},
-            "delivery_address": {
-                "city": "Moscow",
-                "street": "Tverskaya",
-                "house": "1",
-                "recipient_name": "Test User",
-                "recipient_phone": "+79990000000",
-            },
-            "payment_method": "CARD_ONLINE",
+            "idempotency_key": str(uuid.uuid4()),
+            "items": [{"sku_id": str(self.sku_id), "quantity": 1}],
+            "delivery_address": "г. Екатеринбург, ул. Мира 19, кв. 42",
         }
 
+    def _catalog_response(self):
+        response = Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "items": [
+                {
+                    "id": str(self.product_id),
+                    "title": "Neo Phone X",
+                    "skus": [
+                        {
+                            "id": str(self.sku_id),
+                            "name": "Black 256GB",
+                            "price": 12999000,
+                            "discount": 0,
+                            "active_quantity": 3,
+                        }
+                    ],
+                }
+            ]
+        }
+        return response
+
+    def _inventory_response(self, payload):
+        response = Mock()
+        response.status_code = 200
+        response.json.return_value = payload
+        return response
+
     @patch("orders_api.views.requests.get")
-    def test_create_order_with_idempotency_key(self, mock_get):
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"can_checkout": True}
-        mock_get.return_value = mock_response
+    @patch("orders_api.views.requests.post")
+    def test_create_order_with_idempotency_key(self, mock_post, mock_get):
+        mock_get.return_value = self._catalog_response()
+        mock_post.return_value = self._inventory_response({"reserved": True, "items": [{"sku_id": str(self.sku_id), "reserved_quantity": 1}]})
 
         payload = self._order_payload()
 
@@ -46,29 +79,28 @@ class OrdersApiTests(TestCase):
             "/api/v1/orders",
             payload,
             format="json",
-            HTTP_IDEMPOTENCY_KEY="idem-1",
-            **self.base_headers,
+            HTTP_AUTHORIZATION=self.auth,
         )
         self.assertEqual(first.status_code, 201)
+        self.assertEqual(first.data["status"], "PAID")
+        self.assertEqual(first.data["items"][0]["product_title"], "Neo Phone X")
 
         second = self.client.post(
             "/api/v1/orders",
             payload,
             format="json",
-            HTTP_IDEMPOTENCY_KEY="idem-1",
-            **self.base_headers,
+            HTTP_AUTHORIZATION=self.auth,
         )
         self.assertEqual(second.status_code, 200)
         self.assertEqual(first.data["id"], second.data["id"])
 
     @patch("orders_api.views.requests.get")
-    def test_invalid_status_transition_returns_409(self, mock_get):
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"can_checkout": True}
-        mock_get.return_value = mock_response
+    @patch("orders_api.views.requests.post")
+    def test_invalid_status_transition_returns_409(self, mock_post, mock_get):
+        mock_get.return_value = self._catalog_response()
+        mock_post.return_value = self._inventory_response({"reserved": True, "items": [{"sku_id": str(self.sku_id), "reserved_quantity": 1}]})
 
-        created = self.client.post("/api/v1/orders", self._order_payload(), format="json", **self.base_headers)
+        created = self.client.post("/api/v1/orders", self._order_payload(), format="json", HTTP_AUTHORIZATION=self.auth)
         self.assertEqual(created.status_code, 201)
         order_id = created.data["id"]
 
@@ -76,7 +108,64 @@ class OrdersApiTests(TestCase):
             f"/api/v1/orders/{order_id}/status",
             {"status": "DELIVERED"},
             format="json",
-            HTTP_X_ADMIN="true",
-            **self.base_headers,
+            HTTP_AUTHORIZATION=self.admin_auth,
         )
         self.assertEqual(patch_response.status_code, 409)
+
+    @patch("orders_api.views.requests.get")
+    @patch("orders_api.views.requests.post")
+    def test_cancel_order_moves_to_cancelled_on_successful_unreserve(self, mock_post, mock_get):
+        mock_get.return_value = self._catalog_response()
+        mock_post.side_effect = [
+            self._inventory_response({"reserved": True, "items": [{"sku_id": str(self.sku_id), "reserved_quantity": 1}]}),
+            self._inventory_response({"unreserved": True, "items": [{"sku_id": str(self.sku_id), "unreserved_quantity": 1}]}),
+        ]
+        created = self.client.post("/api/v1/orders", self._order_payload(), format="json", HTTP_AUTHORIZATION=self.auth)
+        order_id = created.data["id"]
+
+        canceled = self.client.post(f"/api/v1/orders/{order_id}/cancel", {}, format="json", HTTP_AUTHORIZATION=self.auth)
+        self.assertEqual(canceled.status_code, 200)
+        self.assertEqual(canceled.data["status"], "CANCELLED")
+
+    @patch("orders_api.views.requests.get")
+    @patch("orders_api.views.requests.post")
+    def test_delivered_status_triggers_fulfill_call(self, mock_post, mock_get):
+        mock_get.return_value = self._catalog_response()
+        mock_post.side_effect = [
+            self._inventory_response({"reserved": True, "items": [{"sku_id": str(self.sku_id), "reserved_quantity": 1}]}),
+            self._inventory_response({"fulfilled": True}),
+        ]
+        created = self.client.post("/api/v1/orders", self._order_payload(), format="json", HTTP_AUTHORIZATION=self.auth)
+        order_id = created.data["id"]
+        order = Order.objects.get(id=order_id)
+        order.status = Order.Status.ASSEMBLING
+        order.save(update_fields=["status"])
+
+        delivering = self.client.patch(
+            f"/api/v1/orders/{order_id}/status",
+            {"status": "DELIVERING"},
+            format="json",
+            HTTP_AUTHORIZATION=self.admin_auth,
+        )
+        self.assertEqual(delivering.status_code, 200)
+
+        delivered = self.client.patch(
+            f"/api/v1/orders/{order_id}/status",
+            {"status": "DELIVERED"},
+            format="json",
+            HTTP_AUTHORIZATION=self.admin_auth,
+        )
+        self.assertEqual(delivered.status_code, 200)
+        self.assertEqual(delivered.data["status"], "DELIVERED")
+
+    @patch("orders_api.views.requests.get")
+    @patch("orders_api.views.requests.post")
+    def test_orders_list_returns_compact_items(self, mock_post, mock_get):
+        mock_get.return_value = self._catalog_response()
+        mock_post.return_value = self._inventory_response({"reserved": True, "items": [{"sku_id": str(self.sku_id), "reserved_quantity": 1}]})
+        self.client.post("/api/v1/orders", self._order_payload(), format="json", HTTP_AUTHORIZATION=self.auth)
+
+        response = self.client.get("/api/v1/orders?limit=20&offset=0", HTTP_AUTHORIZATION=self.auth)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["total_count"], 1)
+        self.assertIn("items_count", response.data["items"][0])

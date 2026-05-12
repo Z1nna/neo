@@ -978,12 +978,14 @@ function calculateCartTotals(items) {
   let amount = 0;
   const normalized = items.map((item) => {
     const skuData = state.skuMap[item.sku_id] || {};
-    const unitPrice = Number(skuData.unit_price || 0);
-    const lineTotal = unitPrice * Number(item.quantity || 0);
-    amount += lineTotal;
+    const unitPrice = Number(item.unit_price ?? skuData.unit_price ?? 0);
+    const lineTotal = Number(item.line_total ?? (unitPrice * Number(item.quantity || 0)));
+    if (item.available !== false) {
+      amount += lineTotal;
+    }
     return {
       ...item,
-      title: skuData.product_title || skuData.title || item.sku_id,
+      title: item.product_title || skuData.product_title || skuData.title || item.sku_id,
       unitPrice,
       lineTotal,
     };
@@ -1016,9 +1018,15 @@ async function loadCart() {
   totals.normalized.forEach((item) => {
     const row = document.createElement('article');
     row.className = 'cart-item';
+    const availabilityHint = item.available === false
+      ? `<div class="muted" style="color:#be123c">Недоступно: ${item.unavailable_reason || 'UNKNOWN'}</div>`
+      : item.available_stock < item.quantity
+        ? `<div class="muted" style="color:#be123c">На складе осталось ${item.available_stock} шт.</div>`
+        : '';
     row.innerHTML = `
       <strong>${item.title}</strong>
       <div class="muted">SKU: ${item.sku_id}</div>
+      ${availabilityHint}
       <div class="cart-line">
         <button class="btn btn-ghost qty-dec">-</button>
         <span>${item.quantity}</span>
@@ -1060,7 +1068,7 @@ async function loadCart() {
     root.appendChild(row);
   });
 
-  $('cartSummary').textContent = `Позиций: ${data.summary.total_items}. Товаров: ${data.summary.total_quantity}. Сумма: ${formatRub(totals.amount)}`;
+  $('cartSummary').textContent = `Позиций: ${data.summary.total_items}. Товаров: ${data.summary.total_quantity}. Сумма: ${formatRub(data.summary.total_amount ?? totals.amount)}`;
   await renderCheckoutPreview();
 }
 
@@ -1083,10 +1091,12 @@ async function loadFavorites() {
 
     items.forEach((favorite) => {
       const productId = favorite.product?.id || favorite.product_id;
+      const productTitle = favorite.product?.title || productId;
       const node = document.createElement('article');
       node.className = 'favorite-item';
       node.innerHTML = `
-        <strong>${productId}</strong>
+        <strong>${productTitle}</strong>
+        <div class="muted">Product ID: ${productId}</div>
         <div class="muted">Добавлено: ${new Date(favorite.added_at).toLocaleString('ru-RU')}</div>
         <div class="product-actions">
           <button class="btn btn-ghost open-product">К товару</button>
@@ -1225,12 +1235,11 @@ function saveAddress() {
 }
 
 function parseDeliveryAddress() {
-  return {
-    city: $('deliveryCity').value.trim() || 'Moscow',
-    street: $('deliveryStreet').value.trim() || 'Tverskaya 1',
-    apartment: $('deliveryApartment').value.trim() || '1',
-    comment: $('deliveryComment').value.trim() || '',
-  };
+  const city = $('deliveryCity').value.trim() || 'Moscow';
+  const street = $('deliveryStreet').value.trim() || 'Tverskaya 1';
+  const apartment = $('deliveryApartment').value.trim() || '1';
+  const comment = $('deliveryComment').value.trim();
+  return `${city}, ${street}, кв. ${apartment}${comment ? `, ${comment}` : ''}`;
 }
 
 async function renderCheckoutPreview() {
@@ -1254,19 +1263,22 @@ async function renderCheckoutPreview() {
 
   const totals = calculateCartTotals(items);
   items.forEach((item) => {
-    const skuData = state.skuMap[item.sku_id] || {};
     const row = document.createElement('article');
     row.className = 'order-item';
+    const unavailableHint = item.available === false
+      ? `<p class="muted" style="color:#be123c">Недоступно: ${item.unavailable_reason || 'UNKNOWN'}</p>`
+      : '';
     row.innerHTML = `
-      <h3>${skuData.product_title || skuData.title || item.sku_id}</h3>
+      <h3>${item.product_title || item.sku_id}</h3>
       <p class="muted">SKU: ${item.sku_id}</p>
       <p>Количество: ${item.quantity}</p>
-      <p>Цена: ${formatRub((skuData.unit_price || 0) * item.quantity)}</p>
+      <p>Цена: ${formatRub(item.line_total ?? 0)}</p>
+      ${unavailableHint}
     `;
     root.appendChild(row);
   });
 
-  const finalAmount = state.promo?.final_amount ?? totals.amount;
+  const finalAmount = state.promo?.final_amount ?? (cart.summary?.total_amount ?? totals.amount);
   $('checkoutTotal').textContent = formatRub(finalAmount);
 }
 
@@ -1376,35 +1388,30 @@ async function runCheckoutFlow() {
       setMessage('checkoutFlowMsg', 'Корзина пуста', true);
       return;
     }
+    if (!cart.summary?.checkout_ready) {
+      setMessage('checkoutFlowMsg', 'В корзине есть недоступные позиции или не хватает остатков', true);
+      return;
+    }
 
-    const totals = calculateCartTotals(cart.items);
-    const orderItems = totals.normalized.map((item) => {
-      const skuData = state.skuMap[item.sku_id] || {};
-      if (!skuData.product_id) {
-        throw new Error(`Не хватает product_id для SKU ${item.sku_id}`);
-      }
-      return {
-        product_id: skuData.product_id,
-        sku_id: item.sku_id,
-        quantity: item.quantity,
-        unit_price: { amount: item.unitPrice, currency: 'RUB' },
-        line_total: { amount: item.lineTotal, currency: 'RUB' },
-      };
-    });
-
-    const finalAmount = state.promo?.final_amount ?? totals.amount;
+    const orderItems = (cart.checkout_payload?.items || []).map((item) => ({
+      sku_id: item.sku_id,
+      quantity: item.quantity,
+    }));
+    if (!orderItems.length) {
+      setMessage('checkoutFlowMsg', 'Нет доступных позиций для оформления', true);
+      return;
+    }
 
     const order = await api('/api/v1/orders/orders/', {
       method: 'POST',
-      headers: apiHeaders({ 'Idempotency-Key': crypto.randomUUID() }),
+      headers: apiHeaders(),
       body: JSON.stringify({
+        idempotency_key: crypto.randomUUID(),
         items: orderItems,
-        total: { amount: finalAmount, currency: 'RUB' },
         delivery_address: parseDeliveryAddress(),
-        payment_method: 'CARD_ONLINE',
-        comment: state.promo?.promo_code ? `promo=${state.promo.promo_code}` : 'checkout flow',
       }),
     });
+    const finalAmount = Number(order.total_amount || cart.summary?.total_amount || 0);
 
     const paymentHold = await api('/api/v1/payments/payments/hold/', {
       method: 'POST',
@@ -1514,7 +1521,7 @@ async function loadOrders() {
     }
 
     items.forEach((order) => {
-      const canCancel = ['PENDING', 'PAID', 'ASSEMBLING'].includes(order.status);
+      const canCancel = ['PENDING', 'PAID'].includes(order.status);
       const node = document.createElement('article');
       node.className = 'order-item';
       node.innerHTML = `
@@ -1523,9 +1530,9 @@ async function loadOrders() {
           <span class="badge">${order.status}</span>
         </div>
         <p class="muted">Создан: ${new Date(order.created_at).toLocaleString('ru-RU')}</p>
-        <p><strong>Сумма:</strong> ${formatRub(order.total?.amount || 0)}</p>
+        <p><strong>Сумма:</strong> ${formatRub(order.total_amount || 0)}</p>
         <div class="order-lines">
-          ${(order.items || []).map((item) => `<div class="muted">SKU ${item.sku_id} x ${item.quantity}</div>`).join('')}
+          <div class="muted">Позиций: ${order.items_count || 0}</div>
         </div>
         ${canCancel ? '<button class="btn btn-danger cancel-order-btn">Отменить заказ</button>' : ''}
       `;

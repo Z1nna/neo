@@ -13,6 +13,7 @@ from .views import (
     FavoriteSubscribeView,
     HomeBannersView,
     MainCollectionsView,
+    ProductEventsView,
 )
 
 
@@ -35,10 +36,12 @@ urlpatterns = [
     path("favorites/<uuid:product_id>/subscribe/", FavoriteSubscribeView.as_view(), name="favorites-subscribe"),
     path("main/collections", MainCollectionsView.as_view(), name="main-collections-no-slash"),
     path("main/collections/", MainCollectionsView.as_view(), name="main-collections"),
-    path("collections/<slug:collection_id>/products", CollectionProductsView.as_view(), name="collection-products-no-slash"),
-    path("collections/<slug:collection_id>/products/", CollectionProductsView.as_view(), name="collection-products"),
+    path("collections/<uuid:collection_id>/products", CollectionProductsView.as_view(), name="collection-products-no-slash"),
+    path("collections/<uuid:collection_id>/products/", CollectionProductsView.as_view(), name="collection-products"),
     path("home/banners", HomeBannersView.as_view(), name="home-banners-no-slash"),
     path("home/banners/", HomeBannersView.as_view(), name="home-banners"),
     path("cart/validate", CartValidateView.as_view(), name="cart-validate-no-slash"),
     path("cart/validate/", CartValidateView.as_view(), name="cart-validate"),
+    path("events/product", ProductEventsView.as_view(), name="events-product-no-slash"),
+    path("events/product/", ProductEventsView.as_view(), name="events-product"),
 ]

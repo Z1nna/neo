@@ -9,9 +9,10 @@ class Order(models.Model):
         PENDING = "PENDING", "PENDING"
         PAID = "PAID", "PAID"
         ASSEMBLING = "ASSEMBLING", "ASSEMBLING"
-        SHIPPED = "SHIPPED", "SHIPPED"
+        DELIVERING = "DELIVERING", "DELIVERING"
         DELIVERED = "DELIVERED", "DELIVERED"
         CANCELED = "CANCELED", "CANCELED"
+        CANCEL_PENDING = "CANCEL_PENDING", "CANCEL_PENDING"
 
     class PaymentMethod(models.TextChoices):
         CARD_ONLINE = "CARD_ONLINE", "CARD_ONLINE"
@@ -43,6 +44,8 @@ class OrderItem(models.Model):
 
     product_id = models.UUIDField()
     sku_id = models.UUIDField()
+    product_title = models.CharField(max_length=255, default="")
+    sku_name = models.CharField(max_length=255, default="")
     quantity = models.PositiveIntegerField(validators=[MinValueValidator(1)])
 
     unit_price_amount = models.BigIntegerField(validators=[MinValueValidator(0)])

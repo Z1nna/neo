@@ -20,6 +20,8 @@ class CatalogContractTests(TestCase):
             "/api/v1/categories",
             "/api/v1/categories/{id}",
             "/api/v1/categories/{id}/filters",
+            "/api/v1/catalog/facets",
+            "/api/v1/breadcrumbs",
         ]
 
         for path in expected_paths:

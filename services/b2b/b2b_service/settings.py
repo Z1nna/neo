@@ -101,3 +101,4 @@ JWT_ISSUER = os.getenv('JWT_ISSUER', '')
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 EVENT_STREAM = os.getenv('EVENT_STREAM', 'neomarket.events')
 EVENT_SOURCE = 'b2b'
+INTERNAL_SERVICE_KEY = os.getenv('INTERNAL_SERVICE_KEY', 'neomarket-internal-key')

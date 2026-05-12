@@ -1,3 +1,4 @@
+from django.utils.text import slugify
 from rest_framework import serializers
 
 from .models import Category, Product, Sku, ProductImage, ProductAttribute
@@ -8,7 +9,7 @@ def _serialize_image(image) -> dict | None:
         return None
     return {
         "url": image.image_url,
-        "order": image.order,
+        "ordering": image.order,
     }
 
 
@@ -71,13 +72,16 @@ class CategoryDetailSerializer(serializers.ModelSerializer):
 
     def get_seo(self, obj) -> dict:
         return {
-            "title": obj.name,
-            "description": obj.description or "",
-            "keywords": [],
+            "title": f"Купить {obj.name.lower()} в интернет-магазине | NeoMarket",
+            "description": obj.description or f"{obj.name} по выгодным ценам в NeoMarket.",
+            "keywords": [obj.name.lower()],
         }
 
-    def get_meta_tags(self, _obj) -> dict:
-        return {}
+    def get_meta_tags(self, obj) -> dict:
+        return {
+            "og_title": f"{obj.name} | NeoMarket",
+            "og_description": obj.description or f"Купить {obj.name.lower()} в интернет-магазине.",
+        }
 
 
 class SkuShortSerializer(serializers.ModelSerializer):
@@ -97,27 +101,40 @@ class SkuShortSerializer(serializers.ModelSerializer):
 class SkuDetailSerializer(serializers.ModelSerializer):
     characteristics = serializers.SerializerMethodField()
     images = serializers.SerializerMethodField()
+    discount = serializers.SerializerMethodField()
+    image = serializers.SerializerMethodField()
 
     class Meta:
         model = Sku
-        fields = ["id", "name", "price", "active_quantity", "characteristics", "images"]
+        fields = ["id", "name", "price", "discount", "image", "active_quantity", "characteristics", "images"]
 
     def get_characteristics(self, obj) -> list[dict]:
         return [
-            {"name": str(name).upper(), "value": str(value)}
+            {"name": str(name), "value": str(value)}
             for name, value in (obj.attributes or {}).items()
         ]
 
     def get_images(self, obj) -> list[dict]:
         return [_serialize_image(image) for image in obj.product.images.all()]
 
+    def get_discount(self, _obj) -> int:
+        return 0
+
+    def get_image(self, obj) -> str | None:
+        main_image = obj.product.images.filter(is_main=True).first()
+        if main_image:
+            return main_image.image_url
+        first_image = obj.product.images.first()
+        return first_image.image_url if first_image else None
+
 
 class ProductImageSerializer(serializers.ModelSerializer):
     url = serializers.CharField(source="image_url", read_only=True)
+    ordering = serializers.IntegerField(source="order", read_only=True)
 
     class Meta:
         model = ProductImage
-        fields = ["url", "order"]
+        fields = ["url", "ordering"]
 
 
 class ProductAttributeSerializer(serializers.ModelSerializer):
@@ -166,11 +183,13 @@ class ProductDetailSerializer(serializers.ModelSerializer):
     characteristics = serializers.SerializerMethodField()
     images = ProductImageSerializer(many=True, read_only=True)
     skus = SkuDetailSerializer(many=True, read_only=True)
+    slug = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
         fields = [
             "id",
+            "slug",
             "title",
             "description",
             "status",
@@ -184,6 +203,9 @@ class ProductDetailSerializer(serializers.ModelSerializer):
         attributes = obj.attributes.all()
         return ProductAttributeSerializer(attributes, many=True).data
 
+    def get_slug(self, obj) -> str:
+        return slugify(obj.title, allow_unicode=True)
+
 
 class FilterItemSerializer(serializers.Serializer):
     slug = serializers.CharField()
@@ -192,3 +214,13 @@ class FilterItemSerializer(serializers.Serializer):
     value = serializers.ListField(required=False)
     min = serializers.IntegerField(required=False)
     max = serializers.IntegerField(required=False)
+
+
+class FacetValueSerializer(serializers.Serializer):
+    value = serializers.CharField()
+    count = serializers.IntegerField(min_value=0)
+
+
+class FacetSerializer(serializers.Serializer):
+    name = serializers.CharField()
+    values = FacetValueSerializer(many=True)

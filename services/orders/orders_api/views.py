@@ -12,21 +12,17 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import IdempotencyKey, IntegrationOutbox, Order, OrderItem
-from .serializers import (
-    CancelOrderRequestSerializer,
-    CreateOrderRequestSerializer,
-    OrderSerializer,
-    UpdateOrderStatusRequestSerializer,
-)
+from .serializers import CancelOrderRequestSerializer, CreateOrderRequestSerializer, OrderListItemSerializer, OrderSerializer, UpdateOrderStatusRequestSerializer
 
 
 ALLOWED_TRANSITIONS = {
     Order.Status.PENDING: {Order.Status.PAID, Order.Status.CANCELED},
     Order.Status.PAID: {Order.Status.ASSEMBLING, Order.Status.CANCELED},
-    Order.Status.ASSEMBLING: {Order.Status.SHIPPED, Order.Status.CANCELED},
-    Order.Status.SHIPPED: {Order.Status.DELIVERED},
+    Order.Status.ASSEMBLING: {Order.Status.DELIVERING},
+    Order.Status.DELIVERING: {Order.Status.DELIVERED},
     Order.Status.DELIVERED: set(),
     Order.Status.CANCELED: set(),
+    Order.Status.CANCEL_PENDING: {Order.Status.CANCELED},
 }
 
 
@@ -84,10 +80,8 @@ def _extract_identity(request):
         is_admin = any(role.upper() == "ADMIN" for role in roles) or bool(payload.get("is_admin"))
         if user_id:
             return user_id, is_admin, False
-
         return None, False, True
 
-    # Backward-compatible bootstrap mode.
     user_id = _parse_uuid(request.headers.get("X-User-Id"))
     is_admin = request.headers.get("X-Admin", "false").lower() == "true"
     return user_id, is_admin, False
@@ -96,9 +90,9 @@ def _extract_identity(request):
 def _get_user_id(request):
     user_id, _is_admin, token_error = _extract_identity(request)
     if token_error:
-        return None, _error("UNAUTHORIZED", "Invalid JWT token", status.HTTP_401_UNAUTHORIZED)
+        return None, _error("UNAUTHORIZED", "Требуется авторизация", status.HTTP_401_UNAUTHORIZED)
     if not user_id:
-        return None, _error("UNAUTHORIZED", "User is not authorized", status.HTTP_401_UNAUTHORIZED)
+        return None, _error("UNAUTHORIZED", "Требуется авторизация", status.HTTP_401_UNAUTHORIZED)
     return user_id, None
 
 
@@ -107,26 +101,58 @@ def _is_admin(request):
     return is_admin
 
 
-def _validate_cart_for_checkout(user_id):
-    url = settings.CART_VALIDATE_URL
-    timeout = settings.CART_VALIDATE_TIMEOUT
+def _catalog_products_by_sku_ids(sku_ids):
+    if not sku_ids:
+        return [], None
     try:
-        response = requests.get(url, headers={"X-User-Id": str(user_id)}, timeout=timeout)
+        response = requests.get(
+            settings.CATALOG_PRODUCTS_URL,
+            params={"sku_ids": ",".join(str(item) for item in sku_ids)},
+            headers={"X-Service-Key": settings.INTERNAL_SERVICE_KEY},
+            timeout=settings.CATALOG_TIMEOUT,
+        )
     except requests.RequestException:
-        return _error("SERVICE_UNAVAILABLE", "Cart validation service is unavailable", status.HTTP_503_SERVICE_UNAVAILABLE)
-
+        return None, _error("B2B_UNAVAILABLE", "Сервис товаров временно недоступен, попробуйте позже", status.HTTP_503_SERVICE_UNAVAILABLE)
     if response.status_code != status.HTTP_200_OK:
-        return _error("CART_VALIDATION_FAILED", "Unable to validate cart", status.HTTP_422_UNPROCESSABLE_ENTITY)
-
+        return None, _error("B2B_UNAVAILABLE", "Сервис товаров временно недоступен, попробуйте позже", status.HTTP_503_SERVICE_UNAVAILABLE)
     try:
         payload = response.json()
     except ValueError:
-        return _error("CART_VALIDATION_FAILED", "Invalid cart validation response", status.HTTP_422_UNPROCESSABLE_ENTITY)
+        return None, _error("B2B_UNAVAILABLE", "Сервис товаров временно недоступен, попробуйте позже", status.HTTP_503_SERVICE_UNAVAILABLE)
+    return payload.get("items", []), None
 
-    if not payload.get("can_checkout", False):
-        return _error("CART_VALIDATION_FAILED", "Cart is not ready for checkout", status.HTTP_422_UNPROCESSABLE_ENTITY)
 
-    return None
+def _inventory_call(url, payload):
+    try:
+        response = requests.post(
+            url,
+            json=payload,
+            headers={"X-Service-Key": settings.INTERNAL_SERVICE_KEY},
+            timeout=settings.B2B_TIMEOUT,
+        )
+    except requests.RequestException:
+        return None, "unavailable"
+    try:
+        data = response.json()
+    except ValueError:
+        data = {}
+    return (response.status_code, data), None
+
+
+def _normalize_items(items):
+    aggregated = {}
+    for item in items:
+        sku_id = str(item["sku_id"])
+        aggregated[sku_id] = aggregated.get(sku_id, 0) + int(item["quantity"])
+    return [{"sku_id": key, "quantity": value} for key, value in aggregated.items()]
+
+
+def _sku_context(products):
+    context = {}
+    for product in products:
+        for sku in product.get("skus", []):
+            context[str(sku["id"])] = (product, sku)
+    return context
 
 
 def _outbox_event(order_id, event_type, payload):
@@ -134,11 +160,7 @@ def _outbox_event(order_id, event_type, payload):
 
 
 @extend_schema_view(
-    post=extend_schema(
-        operation_id="orders_create",
-        request=CreateOrderRequestSerializer,
-        responses=OrderSerializer,
-    ),
+    post=extend_schema(operation_id="orders_create", request=CreateOrderRequestSerializer, responses=OrderSerializer),
     get=extend_schema(operation_id="orders_list", responses=OpenApiTypes.OBJECT),
 )
 class OrdersView(APIView):
@@ -150,54 +172,102 @@ class OrdersView(APIView):
 
         serializer = CreateOrderRequestSerializer(data=request.data)
         if not serializer.is_valid():
-            return _error("BAD_REQUEST", "Invalid request payload", status.HTTP_400_BAD_REQUEST)
-
-        idem_key = request.headers.get("Idempotency-Key")
-        if idem_key:
-            existing = IdempotencyKey.objects.filter(key=idem_key, user_id=user_id).select_related("order").first()
-            if existing:
-                return Response(OrderSerializer(existing.order).data, status=status.HTTP_200_OK)
-
-        cart_error = _validate_cart_for_checkout(user_id)
-        if cart_error:
-            return cart_error
+            return _error("INVALID_REQUEST", "Invalid request payload", status.HTTP_400_BAD_REQUEST)
 
         data = serializer.validated_data
+        idem_key = str(data["idempotency_key"])
+        existing = IdempotencyKey.objects.filter(key=idem_key, user_id=user_id).select_related("order").first()
+        if existing:
+            return Response(OrderSerializer(existing.order).data, status=status.HTTP_200_OK)
+
+        items = _normalize_items(data["items"])
+        products, catalog_error = _catalog_products_by_sku_ids([item["sku_id"] for item in items])
+        if catalog_error:
+            return catalog_error
+        context = _sku_context(products)
+
+        failed_items = []
+        prepared_items = []
+        total_amount = 0
+        for item in items:
+            product, sku = context.get(str(item["sku_id"]), (None, None))
+            if not product or not sku:
+                failed_items.append({"sku_id": str(item["sku_id"]), "requested": item["quantity"], "available": 0, "reason": "SKU_NOT_FOUND"})
+                continue
+            available = int(sku.get("active_quantity") or 0)
+            if available < item["quantity"]:
+                failed_items.append(
+                    {
+                        "sku_id": str(item["sku_id"]),
+                        "requested": item["quantity"],
+                        "available": available,
+                        "reason": "OUT_OF_STOCK" if available == 0 else "INSUFFICIENT_STOCK",
+                    }
+                )
+                continue
+            unit_price = int(sku.get("price") or 0) - int(sku.get("discount") or 0)
+            line_total = unit_price * int(item["quantity"])
+            total_amount += line_total
+            prepared_items.append(
+                {
+                    "product_id": product["id"],
+                    "product_title": product.get("title", ""),
+                    "sku_id": str(item["sku_id"]),
+                    "sku_name": sku.get("name", ""),
+                    "quantity": int(item["quantity"]),
+                    "unit_price_amount": unit_price,
+                    "line_total_amount": line_total,
+                }
+            )
+
+        if failed_items:
+            return Response({"code": "RESERVE_FAILED", "message": "Не удалось зарезервировать товары", "failed_items": failed_items}, status=status.HTTP_409_CONFLICT)
+
+        reserve_result, reserve_error = _inventory_call(
+            settings.B2B_RESERVE_URL,
+            {"idempotency_key": idem_key, "items": [{"sku_id": item["sku_id"], "quantity": item["quantity"]} for item in items]},
+        )
+        if reserve_error == "unavailable":
+            return _error("B2B_UNAVAILABLE", "Сервис товаров временно недоступен, попробуйте позже", status.HTTP_503_SERVICE_UNAVAILABLE)
+        reserve_status, reserve_payload = reserve_result
+        if reserve_status == status.HTTP_409_CONFLICT:
+            return Response(
+                {
+                    "code": "RESERVE_FAILED",
+                    "message": "Не удалось зарезервировать товары",
+                    "failed_items": reserve_payload.get("failed_items", []),
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        if reserve_status != status.HTTP_200_OK:
+            return _error("B2B_UNAVAILABLE", "Сервис товаров временно недоступен, попробуйте позже", status.HTTP_503_SERVICE_UNAVAILABLE)
+
         order = Order.objects.create(
             user_id=user_id,
-            status=Order.Status.PENDING,
-            total_amount=data["total"]["amount"],
-            total_currency=data["total"]["currency"],
-            payment_method=data["payment_method"],
-            delivery_address=data["delivery_address"],
-            comment=data.get("comment"),
+            status=Order.Status.PAID,
+            total_amount=total_amount,
+            total_currency="RUB",
+            payment_method=Order.PaymentMethod.CARD_ONLINE,
+            delivery_address=data.get("delivery_address", ""),
         )
-
-        items = []
-        for item in data["items"]:
-            items.append(
-                OrderItem(
-                    order=order,
-                    product_id=item["product_id"],
-                    sku_id=item["sku_id"],
-                    quantity=item["quantity"],
-                    unit_price_amount=item["unit_price"]["amount"],
-                    unit_price_currency=item["unit_price"]["currency"],
-                    line_total_amount=item["line_total"]["amount"],
-                    line_total_currency=item["line_total"]["currency"],
-                )
+        rows = [
+            OrderItem(
+                order=order,
+                product_id=item["product_id"],
+                product_title=item["product_title"],
+                sku_id=item["sku_id"],
+                sku_name=item["sku_name"],
+                quantity=item["quantity"],
+                unit_price_amount=item["unit_price_amount"],
+                unit_price_currency="RUB",
+                line_total_amount=item["line_total_amount"],
+                line_total_currency="RUB",
             )
-        OrderItem.objects.bulk_create(items)
-
-        if idem_key:
-            IdempotencyKey.objects.create(key=idem_key, user_id=user_id, order=order)
-
-        _outbox_event(
-            order.id,
-            'ORDER_CREATED',
-            {'order_id': str(order.id), 'user_id': str(order.user_id), 'status': order.status, 'total_amount': order.total_amount},
-        )
-
+            for item in prepared_items
+        ]
+        OrderItem.objects.bulk_create(rows)
+        IdempotencyKey.objects.create(key=idem_key, user_id=user_id, order=order)
+        _outbox_event(order.id, "ORDER_CREATED", {"order_id": str(order.id), "user_id": str(order.user_id), "status": order.status, "total_amount": order.total_amount})
         return Response(OrderSerializer(order).data, status=status.HTTP_201_CREATED)
 
     def get(self, request):
@@ -209,25 +279,18 @@ class OrdersView(APIView):
             limit = max(1, min(int(request.query_params.get("limit", 20)), 100))
             offset = max(0, int(request.query_params.get("offset", 0)))
         except ValueError:
-            return _error("BAD_REQUEST", "Invalid pagination parameters", status.HTTP_400_BAD_REQUEST)
+            return _error("INVALID_REQUEST", "Invalid pagination parameters", status.HTTP_400_BAD_REQUEST)
 
         queryset = Order.objects.filter(user_id=user_id).prefetch_related("items")
+        status_filter = request.query_params.get("status")
+        if status_filter:
+            queryset = queryset.filter(status="CANCELED" if status_filter == "CANCELLED" else status_filter)
         total = queryset.count()
         orders = queryset[offset : offset + limit]
-
-        return Response(
-            {
-                "items": OrderSerializer(orders, many=True).data,
-                "total": total,
-                "limit": limit,
-                "offset": offset,
-            }
-        )
+        return Response({"items": OrderListItemSerializer(orders, many=True).data, "total_count": total, "limit": limit, "offset": offset})
 
 
-@extend_schema_view(
-    get=extend_schema(operation_id="orders_get", responses=OrderSerializer),
-)
+@extend_schema_view(get=extend_schema(operation_id="orders_get", responses=OrderSerializer))
 class OrderDetailView(APIView):
     def get(self, request, order_id):
         user_id, error = _get_user_id(request)
@@ -236,17 +299,12 @@ class OrderDetailView(APIView):
 
         order = Order.objects.filter(id=order_id, user_id=user_id).prefetch_related("items").first()
         if not order:
-            return _error("NOT_FOUND", "Order not found", status.HTTP_404_NOT_FOUND)
-
+            return _error("ORDER_NOT_FOUND", "Заказ не найден", status.HTTP_404_NOT_FOUND)
         return Response(OrderSerializer(order).data)
 
 
 @extend_schema_view(
-    post=extend_schema(
-        operation_id="orders_cancel",
-        request=CancelOrderRequestSerializer,
-        responses=OrderSerializer,
-    ),
+    post=extend_schema(operation_id="orders_cancel", request=CancelOrderRequestSerializer, responses=OrderSerializer),
 )
 class OrderCancelView(APIView):
     @transaction.atomic
@@ -257,60 +315,77 @@ class OrderCancelView(APIView):
 
         serializer = CancelOrderRequestSerializer(data=request.data or {})
         if not serializer.is_valid():
-            return _error("BAD_REQUEST", "Invalid cancel payload", status.HTTP_400_BAD_REQUEST)
+            return _error("INVALID_REQUEST", "Invalid cancel payload", status.HTTP_400_BAD_REQUEST)
 
-        order = Order.objects.filter(id=order_id, user_id=user_id).first()
+        order = Order.objects.filter(id=order_id, user_id=user_id).prefetch_related("items").first()
         if not order:
-            return _error("NOT_FOUND", "Order not found", status.HTTP_404_NOT_FOUND)
+            return _error("ORDER_NOT_FOUND", "Заказ не найден", status.HTTP_404_NOT_FOUND)
 
-        if order.status not in {Order.Status.PENDING, Order.Status.PAID, Order.Status.ASSEMBLING}:
-            return _error("INVALID_STATE_TRANSITION", "Order cannot be canceled in current status", status.HTTP_409_CONFLICT)
+        if order.status not in {Order.Status.PENDING, Order.Status.PAID}:
+            current_status = "CANCELLED" if order.status == Order.Status.CANCELED else order.status
+            return Response(
+                {
+                    "code": "CANCEL_NOT_ALLOWED",
+                    "message": f"Отмена невозможна: заказ в статусе {current_status}",
+                    "current_status": current_status,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
 
-        order.status = Order.Status.CANCELED
+        result, unreserve_error = _inventory_call(
+            settings.B2B_UNRESERVE_URL,
+            {
+                "idempotency_key": str(order.id),
+                "items": [{"sku_id": str(item.sku_id), "quantity": item.quantity} for item in order.items.all()],
+            },
+        )
+        if unreserve_error == "unavailable":
+            order.status = Order.Status.CANCEL_PENDING
+        else:
+            unreserve_status, _payload = result
+            order.status = Order.Status.CANCELED if unreserve_status == status.HTTP_200_OK else Order.Status.CANCEL_PENDING
         order.cancel_reason = serializer.validated_data.get("reason") or order.cancel_reason
         order.save(update_fields=["status", "cancel_reason", "updated_at"])
-        _outbox_event(order.id, 'ORDER_CANCELED', {'order_id': str(order.id), 'reason': order.cancel_reason or ''})
-
+        _outbox_event(order.id, "ORDER_CANCELED", {"order_id": str(order.id), "reason": order.cancel_reason or ""})
         return Response(OrderSerializer(order).data)
 
 
 @extend_schema_view(
-    patch=extend_schema(
-        operation_id="orders_update_status",
-        request=UpdateOrderStatusRequestSerializer,
-        responses=OrderSerializer,
-    ),
+    patch=extend_schema(operation_id="orders_update_status", request=UpdateOrderStatusRequestSerializer, responses=OrderSerializer),
 )
 class OrderStatusView(APIView):
     @transaction.atomic
     def patch(self, request, order_id):
-        user_id, error = _get_user_id(request)
+        _user_id, error = _get_user_id(request)
         if error:
             return error
-
         if not _is_admin(request):
             return _error("FORBIDDEN", "Admin role required", status.HTTP_403_FORBIDDEN)
 
         serializer = UpdateOrderStatusRequestSerializer(data=request.data)
         if not serializer.is_valid():
-            return _error("BAD_REQUEST", "Invalid status payload", status.HTTP_400_BAD_REQUEST)
+            return _error("INVALID_REQUEST", "Invalid status payload", status.HTTP_400_BAD_REQUEST)
 
-        order = Order.objects.filter(id=order_id).first()
+        order = Order.objects.filter(id=order_id).prefetch_related("items").first()
         if not order:
             return _error("NOT_FOUND", "Order not found", status.HTTP_404_NOT_FOUND)
 
         new_status = serializer.validated_data["status"]
-        if new_status not in ALLOWED_TRANSITIONS[order.status]:
-            return _error(
-                "INVALID_STATE_TRANSITION",
-                "Status transition is not allowed",
-                status.HTTP_409_CONFLICT,
-            )
+        if new_status not in ALLOWED_TRANSITIONS.get(order.status, set()):
+            return _error("INVALID_STATE_TRANSITION", "Status transition is not allowed", status.HTTP_409_CONFLICT)
 
         order.status = new_status
         if new_status == Order.Status.CANCELED and serializer.validated_data.get("reason"):
             order.cancel_reason = serializer.validated_data.get("reason")
         order.save(update_fields=["status", "cancel_reason", "updated_at"])
-        _outbox_event(order.id, 'ORDER_STATUS_UPDATED', {'order_id': str(order.id), 'status': order.status})
 
+        if new_status == Order.Status.DELIVERED:
+            result, fulfill_error = _inventory_call(
+                settings.B2B_FULFILL_URL,
+                {"order_id": str(order.id), "items": [{"sku_id": str(item.sku_id), "quantity": item.quantity} for item in order.items.all()]},
+            )
+            if fulfill_error == "unavailable" or result[0] != status.HTTP_200_OK:
+                _outbox_event(order.id, "ORDER_FULFILL_PENDING", {"order_id": str(order.id)})
+
+        _outbox_event(order.id, "ORDER_STATUS_UPDATED", {"order_id": str(order.id), "status": order.status})
         return Response(OrderSerializer(order).data)
