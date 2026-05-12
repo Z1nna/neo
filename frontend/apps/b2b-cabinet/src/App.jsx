@@ -184,6 +184,12 @@ async function request(path, { sellerId, method = 'GET', body } = {}) {
   const payload = contentType.includes('application/json') ? await response.json() : null
 
   if (!response.ok) {
+    if (response.status === 401 && payload?.message === 'Invalid JWT token') {
+      clearAuthSession()
+      localStorage.removeItem(SELLER_ID_KEY)
+      throw new Error('Сессия продавца устарела. Войдите заново.')
+    }
+
     const message = getApiErrorMessage(payload, response.status)
     throw new Error(message)
   }

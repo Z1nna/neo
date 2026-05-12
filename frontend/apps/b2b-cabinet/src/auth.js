@@ -1,5 +1,5 @@
 const AUTH_API_BASE = '/api/v1/auth'
-const AUTH_STORAGE_KEY = 'neomarket-auth-session'
+const AUTH_STORAGE_KEY = 'neomarket-b2b-auth-session'
 
 function parseJson(raw, fallback) {
   try {
@@ -56,6 +56,7 @@ function saveAuthSession(payload) {
 
 export function clearAuthSession() {
   localStorage.removeItem(AUTH_STORAGE_KEY)
+  localStorage.removeItem('b2b-seller-id')
 }
 
 export function buildApiHeaders() {

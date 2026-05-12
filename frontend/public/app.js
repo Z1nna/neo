@@ -543,7 +543,7 @@ async function addToCart(product, skuId, quantity = 1) {
   state.skuMap[skuId] = skuData;
   persistLocalData();
 
-  await api('/api/v1/cart/cart/items/', {
+  await api('/api/v1/cart/items/', {
     method: 'POST',
     headers: apiHeaders(),
     body: JSON.stringify({ sku_id: skuId, quantity }),
@@ -589,7 +589,7 @@ function productCardNode(product) {
       if (!state.authToken) {
         throw new Error('Для избранного нужна авторизация');
       }
-      await api(`/api/v1/cart/favorites/${product.id}/`, {
+      await api(`/api/v1/favorites/${product.id}/`, {
         method: 'POST',
         headers: apiHeaders(),
       });
@@ -925,7 +925,7 @@ async function askQuestion() {
 }
 
 async function loadBanners() {
-  const data = await api('/api/v1/cart/home/banners/');
+  const data = await api('/api/v1/home/banners/');
   const root = $('heroBanners');
   root.innerHTML = '';
 
@@ -939,7 +939,7 @@ async function loadBanners() {
 }
 
 async function loadCollections() {
-  const data = await api('/api/v1/cart/main/collections/');
+  const data = await api('/api/v1/main/collections/');
   const grid = $('collectionsGrid');
   grid.innerHTML = '';
 
@@ -952,7 +952,7 @@ async function loadCollections() {
       <button class="btn btn-ghost">Открыть подборку</button>
     `;
     node.querySelector('button').addEventListener('click', async () => {
-      const payload = await api(`/api/v1/cart/collections/${collection.id}/products/`);
+      const payload = await api(`/api/v1/collections/${collection.id}/products/`);
       state.homeProducts = payload.items || [];
       renderHomeProducts();
       activateTab('catalog');
@@ -969,7 +969,7 @@ function renderHomeProducts() {
 }
 
 async function loadHomeProducts() {
-  const data = await api('/api/v1/cart/cart/also_bought/');
+  const data = await api('/api/v1/cart/also_bought/');
   state.homeProducts = data.items || [];
   renderHomeProducts();
 }
@@ -1001,7 +1001,7 @@ async function loadCart() {
     return;
   }
 
-  const data = await api('/api/v1/cart/cart/', { headers: apiHeaders() });
+  const data = await api('/api/v1/cart/', { headers: apiHeaders() });
   const cartItems = data.items || [];
   const root = $('cartItems');
   root.innerHTML = '';
@@ -1040,7 +1040,7 @@ async function loadCart() {
       if (item.quantity <= 1) {
         return;
       }
-      await api(`/api/v1/cart/cart/items/${item.item_id}/`, {
+      await api(`/api/v1/cart/items/${item.item_id}/`, {
         method: 'PUT',
         headers: apiHeaders(),
         body: JSON.stringify({ quantity: item.quantity - 1 }),
@@ -1049,7 +1049,7 @@ async function loadCart() {
     });
 
     row.querySelector('.qty-inc').addEventListener('click', async () => {
-      await api(`/api/v1/cart/cart/items/${item.item_id}/`, {
+      await api(`/api/v1/cart/items/${item.item_id}/`, {
         method: 'PUT',
         headers: apiHeaders(),
         body: JSON.stringify({ quantity: item.quantity + 1 }),
@@ -1058,7 +1058,7 @@ async function loadCart() {
     });
 
     row.querySelector('.remove').addEventListener('click', async () => {
-      await api(`/api/v1/cart/cart/items/${item.item_id}/`, {
+      await api(`/api/v1/cart/items/${item.item_id}/`, {
         method: 'DELETE',
         headers: apiHeaders(),
       });
@@ -1080,7 +1080,7 @@ async function loadFavorites() {
   }
 
   try {
-    const data = await api('/api/v1/cart/favorites/?limit=20&offset=0', { headers: apiHeaders() });
+    const data = await api('/api/v1/favorites/?limit=20&offset=0', { headers: apiHeaders() });
     const items = data.items || [];
     list.innerHTML = '';
 
@@ -1110,7 +1110,7 @@ async function loadFavorites() {
       });
 
       node.querySelector('.remove-fav').addEventListener('click', async () => {
-        await api(`/api/v1/cart/favorites/${productId}/`, {
+        await api(`/api/v1/favorites/${productId}/`, {
           method: 'DELETE',
           headers: apiHeaders(),
         });
@@ -1252,7 +1252,7 @@ async function renderCheckoutPreview() {
     return;
   }
 
-  const cart = await api('/api/v1/cart/cart/', { headers: apiHeaders() });
+  const cart = await api('/api/v1/cart/', { headers: apiHeaders() });
   const items = cart.items || [];
 
   if (!items.length) {
@@ -1288,7 +1288,7 @@ async function applyPromo() {
     return;
   }
 
-  const cart = await api('/api/v1/cart/cart/', { headers: apiHeaders() });
+  const cart = await api('/api/v1/cart/', { headers: apiHeaders() });
   const totals = calculateCartTotals(cart.items || []);
   if (!totals.amount) {
     setMessage('promoResult', 'Корзина пуста', true);
@@ -1383,7 +1383,7 @@ async function runCheckoutFlow() {
   }
 
   try {
-    const cart = await api('/api/v1/cart/cart/', { headers: apiHeaders() });
+    const cart = await api('/api/v1/cart/', { headers: apiHeaders() });
     if (!cart.items?.length) {
       setMessage('checkoutFlowMsg', 'Корзина пуста', true);
       return;
@@ -1444,7 +1444,7 @@ async function runCheckoutFlow() {
     rememberShipmentId(shipment.id);
     state.lastPayment = paymentCapture;
 
-    await api('/api/v1/cart/cart/', {
+    await api('/api/v1/cart/', {
       method: 'DELETE',
       headers: apiHeaders(),
     });
@@ -1752,7 +1752,7 @@ function bindEvents() {
     if (!state.authToken) {
       return;
     }
-    await api('/api/v1/cart/cart/', { method: 'DELETE', headers: apiHeaders() });
+    await api('/api/v1/cart/', { method: 'DELETE', headers: apiHeaders() });
     await Promise.all([loadCart(), renderCheckoutPreview()]);
   });
 
