@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Товар — NeoMarket</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="bg-wave"></div>
+  <div class="bg-glow bg-glow-a"></div>
+  <div class="bg-glow bg-glow-b"></div>
+
+  <div class="shell product-page-shell">
+    <header class="product-page-top">
+      <a class="btn btn-ghost product-page-back" href="./index.html#catalog">← В каталог</a>
+      <a class="btn btn-ghost" href="./">На главную</a>
+      <span class="muted product-page-uid" id="productPageUid" aria-label="Идентификатор товара"></span>
+    </header>
+
+    <p id="productPageError" class="muted product-page-error" style="display: none;"></p>
+
+    <div id="productPageRoot" class="product-page-root" style="display: none;">
+      <nav class="product-page-breadcrumb muted" id="productPageBreadcrumb"></nav>
+
+      <div class="product-page-hero card">
+        <div class="product-page-gallery">
+          <div class="product-page-main-photo" id="productPageMainPhoto"></div>
+          <div class="product-page-thumbs" id="productPageThumbs"></div>
+        </div>
+        <div class="product-page-buy">
+          <h1 class="product-page-title" id="productPageTitle"></h1>
+          <p class="muted" id="productPageCategory"></p>
+          <p class="product-page-price" id="productPagePrice"></p>
+          <p class="muted" id="productPageStock"></p>
+
+          <div class="field">
+            <label for="productPageSku">Вариант (SKU)</label>
+            <select id="productPageSku"></select>
+          </div>
+
+          <div class="product-page-actions">
+            <button type="button" class="btn btn-primary" id="productPageAddCart">В корзину</button>
+            <button type="button" class="btn btn-ghost" id="productPageFavorite">В избранное</button>
+          </div>
+          <p id="productPageActionMsg" class="muted"></p>
+        </div>
+      </div>
+
+      <section class="card product-page-section">
+        <h2 class="subhead">Описание</h2>
+        <div id="productPageDescription" class="product-page-prose muted"></div>
+      </section>
+
+      <section class="card product-page-section">
+        <h2 class="subhead">Характеристики</h2>
+        <div id="productPageSpecs" class="profile-info"></div>
+      </section>
+
+      <section class="card product-page-section">
+        <h2 class="subhead">Похожие товары</h2>
+        <div id="productPageSimilar" class="similar-grid"></div>
+      </section>
+
+      <section class="card product-page-section">
+        <h2 class="subhead">Рейтинг и отзывы</h2>
+        <p id="productPageReviewsSummary" class="muted"></p>
+        <div id="productPageReviewsList" class="reviews-list"></div>
+
+        <div class="field">
+          <label for="productPageReviewRating">Ваша оценка</label>
+          <select id="productPageReviewRating">
+            <option value="5">5</option>
+            <option value="4">4</option>
+            <option value="3">3</option>
+            <option value="2">2</option>
+            <option value="1">1</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="productPageReviewText">Текст отзыва</label>
+          <textarea id="productPageReviewText" rows="3" placeholder="Что понравилось или что стоит улучшить"></textarea>
+        </div>
+        <button type="button" class="btn btn-primary" id="productPageSubmitReview" disabled>Оставить отзыв</button>
+        <p id="productPageReviewMsg" class="muted"></p>
+      </section>
+
+      <section class="card product-page-section">
+        <h2 class="subhead">Вопросы и ответы</h2>
+        <div id="productPageQaList" class="qa-list"></div>
+        <div class="field">
+          <label for="productPageQaQuestion">Ваш вопрос о товаре</label>
+          <textarea id="productPageQaQuestion" rows="2" placeholder="Например: подходит ли для iOS?"></textarea>
+        </div>
+        <button type="button" class="btn btn-ghost" id="productPageAskQa" disabled>Задать вопрос</button>
+        <p id="productPageQaMsg" class="muted"></p>
+      </section>
+    </div>
+  </div>
+
+  <script src="./product-page.js" defer></script>
+</body>
+</html>

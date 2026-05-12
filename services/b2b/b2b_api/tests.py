@@ -5,6 +5,7 @@ from django.conf import settings
 from django.test import TestCase
 from rest_framework.test import APIClient
 
+from .management.commands.consume_moderation_events import Command as ModerationConsumerCommand
 from .models import Category, IntegrationInbox, IntegrationOutbox, Product, SellerProfile, Sku
 
 
@@ -138,6 +139,8 @@ class B2BApiTests(TestCase):
         moderation_events = IntegrationOutbox.objects.filter(aggregate_id=product.id, event_type='PRODUCT_UPDATED')
         self.assertEqual(moderation_events.count(), 1)
         self.assertEqual(moderation_events.first().payload['event_type'], 'CREATED')
+        self.assertEqual(len(moderation_events.first().payload['snapshot_after']['skus']), 1)
+        self.assertEqual(moderation_events.first().payload['snapshot_after']['skus'][0]['id'], str(first_sku.data['id']))
 
         second_sku = self.client.post(
             '/api/v1/skus',
@@ -159,13 +162,16 @@ class B2BApiTests(TestCase):
 
     def test_soft_delete_marks_product_and_keeps_deleted_in_seller_list(self):
         product = self.create_product(status=Product.Status.MODERATED)
-        self.create_sku(product)
+        sku = self.create_sku(product)
 
         deleted = self.client.delete(f'/api/v1/products/{product.id}', **self.headers)
         self.assertEqual(deleted.status_code, 204)
 
         product.refresh_from_db()
+        sku.refresh_from_db()
         self.assertTrue(product.deleted)
+        self.assertTrue(sku.deleted)
+        self.assertEqual(sku.active_quantity, 0)
 
         listed = self.client.get('/api/v1/products?limit=10&offset=0', **self.headers)
         self.assertEqual(listed.status_code, 200)
@@ -180,6 +186,7 @@ class B2BApiTests(TestCase):
         self.assertIsNotNone(moderation_delete)
         self.assertEqual(moderation_delete.payload['event_type'], 'DELETED')
         self.assertEqual(moderation_delete.payload['snapshot_after']['deleted'], True)
+        self.assertEqual(moderation_delete.payload['snapshot_after']['skus'], [])
 
     def test_apply_moderation_event_hard_block_is_idempotent_and_blocks_edits(self):
         product = self.create_product(status=Product.Status.ON_MODERATION)
@@ -234,6 +241,49 @@ class B2BApiTests(TestCase):
         blocked_event = IntegrationOutbox.objects.filter(aggregate_id=product.id, event_type='PRODUCT_BLOCKED').first()
         self.assertIsNotNone(blocked_event)
         self.assertEqual(blocked_event.payload['hard_block'], False)
+        projection_event = IntegrationOutbox.objects.filter(aggregate_id=product.id, event_type='PRODUCT_UPDATED').order_by('-created_at').first()
+        self.assertIsNotNone(projection_event)
+        self.assertEqual(projection_event.payload['snapshot_after']['status'], Product.Status.BLOCKED)
+
+    def test_apply_moderation_event_moderated_emits_projection_update(self):
+        product = self.create_product(status=Product.Status.ON_MODERATION)
+        self.create_sku(product)
+        payload = {
+            'idempotency_key': 'evt-approve',
+            'product_id': str(product.id),
+            'status': 'MODERATED',
+        }
+
+        response = self.client.post('/api/v1/events/moderation', payload, format='json', **self.service_headers)
+        self.assertEqual(response.status_code, 200)
+
+        product.refresh_from_db()
+        self.assertEqual(product.status, Product.Status.MODERATED)
+        self.assertIsNone(product.blocking_reason)
+        self.assertEqual(product.field_reports, [])
+
+        projection_event = IntegrationOutbox.objects.filter(aggregate_id=product.id, event_type='PRODUCT_UPDATED').order_by('-created_at').first()
+        self.assertIsNotNone(projection_event)
+        self.assertEqual(projection_event.payload['snapshot_after']['status'], Product.Status.MODERATED)
+
+    def test_moderation_stream_consumer_applies_approved_event_to_b2b(self):
+        product = self.create_product(status=Product.Status.ON_MODERATION)
+        self.create_sku(product)
+
+        command = ModerationConsumerCommand()
+        command._handle_event(
+            'moderation',
+            'PRODUCT_APPROVED',
+            {
+                'idempotency_key': 'stream-approve-1',
+                'product_id': str(product.id),
+                'moderated_at': '2026-05-12T10:00:00Z',
+            },
+        )
+
+        product.refresh_from_db()
+        self.assertEqual(product.status, Product.Status.MODERATED)
+        self.assertTrue(IntegrationInbox.objects.filter(message_id='stream-approve-1').exists())
 
     def test_reserve_unreserve_and_fulfill_are_idempotent(self):
         product = self.create_product(status=Product.Status.MODERATED)

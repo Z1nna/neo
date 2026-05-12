@@ -1,0 +1,44 @@
+flowchart TB
+    subgraph GW["API Gateway :8888"]
+        NG[nginx]
+    end
+    subgraph Core["Сервисы"]
+        A[auth :8006]
+        B[b2b :8005]
+        M[moderation :8004]
+        C[catalog :8001]
+        K[cart :8002]
+        O[orders :8003]
+        P[payments :8007]
+        L[logistics :8008]
+        R[reviews :8009]
+        Pr[promo :8010]
+        Af[antifraud :8011]
+    end
+    subgraph W["Воркеры / outbox"]
+        BO[b2b-outbox]
+        BM[b2b-moderation-consumer]
+        MW[moderation-worker]
+        MO[moderation-outbox]
+        CP[catalog-projection]
+        OC[orders-consumer]
+        OO[orders-outbox]
+        PO[payments-outbox]
+    end
+    subgraph DS["Данные"]
+        PG[(Postgres)]
+        RD[(Redis neomarket.events)]
+    end
+    NG --> A & B & M & C & K & O & P & L & R & Pr & Af
+    B & M & C & K & O & P & L & R & Pr & Af & A --> PG
+    B --> BO --> RD
+    M --> MO --> RD
+    O --> OO --> RD
+    P --> PO --> RD
+    RD --> MW --> M
+    RD --> BM --> B
+    RD --> CP --> C
+    RD --> OC --> O
+    C -.HTTP.-> B
+    K -.HTTP.-> C
+    O -.HTTP.-> K

@@ -68,8 +68,26 @@ export default function Sidebar({ currentPage, setCurrentPage, isOpen, onClose }
         <div className="sidebar-footer">
           <div className="sidebar-section">
             <h3>Seller focus</h3>
-            <button type="button" className="footer-link">Остатки</button>
-            <button type="button" className="footer-link">Приёмка</button>
+            <button
+              type="button"
+              className="footer-link"
+              onClick={() => {
+                setCurrentPage('products')
+                onClose()
+              }}
+            >
+              Остатки
+            </button>
+            <button
+              type="button"
+              className="footer-link"
+              onClick={() => {
+                setCurrentPage('supplies')
+                onClose()
+              }}
+            >
+              Приёмка
+            </button>
           </div>
           <div className="sidebar-divider"></div>
           <p className="sidebar-version">seller mvp</p>

@@ -139,6 +139,40 @@ def _inventory_call(url, payload):
     return (response.status_code, data), None
 
 
+def _normalize_promo_code(raw):
+    if not raw:
+        return ''
+    s = str(raw).strip()
+    if s.upper() == 'ПОЛИНА' or s.casefold() == 'polina':
+        return 'POLINA'
+    return s.upper()
+
+
+def _apply_promo_to_amount(promo_code, gross_amount):
+    if not promo_code:
+        return gross_amount, None
+    try:
+        response = requests.post(
+            settings.PROMO_APPLY_URL,
+            json={'code': promo_code, 'amount': int(gross_amount)},
+            timeout=3.0,
+        )
+    except requests.RequestException:
+        return None, _error('PROMO_UNAVAILABLE', 'Промо-сервис временно недоступен', status.HTTP_503_SERVICE_UNAVAILABLE)
+    try:
+        body = response.json()
+    except ValueError:
+        return None, _error('PROMO_UNAVAILABLE', 'Промо-сервис временно недоступен', status.HTTP_503_SERVICE_UNAVAILABLE)
+    if response.status_code != status.HTTP_200_OK:
+        return None, _error('PROMO_UNAVAILABLE', 'Промо-сервис временно недоступен', status.HTTP_503_SERVICE_UNAVAILABLE)
+    if not body.get('valid'):
+        return None, Response(
+            {'code': 'PROMO_INVALID', 'message': 'Промокод не применён', 'reason': body.get('reason', 'unknown')},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return int(body['final_amount']), None
+
+
 def _normalize_items(items):
     aggregated = {}
     for item in items:
@@ -242,10 +276,24 @@ class OrdersView(APIView):
         if reserve_status != status.HTTP_200_OK:
             return _error("B2B_UNAVAILABLE", "Сервис товаров временно недоступен, попробуйте позже", status.HTTP_503_SERVICE_UNAVAILABLE)
 
+        promo_code = _normalize_promo_code(data.get('promo_code') or '')
+        charged_amount = total_amount
+        if promo_code:
+            charged_amount, promo_error = _apply_promo_to_amount(promo_code, total_amount)
+            if promo_error is not None:
+                _inventory_call(
+                    settings.B2B_UNRESERVE_URL,
+                    {
+                        'idempotency_key': f'{idem_key}:promo-fail',
+                        'items': [{'sku_id': item['sku_id'], 'quantity': item['quantity']} for item in items],
+                    },
+                )
+                return promo_error
+
         order = Order.objects.create(
             user_id=user_id,
             status=Order.Status.PAID,
-            total_amount=total_amount,
+            total_amount=charged_amount,
             total_currency="RUB",
             payment_method=Order.PaymentMethod.CARD_ONLINE,
             delivery_address=data.get("delivery_address", ""),

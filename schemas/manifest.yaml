@@ -1,0 +1,65 @@
+# NeoMarket — реестр YAML-инстансов и соответствующих схем валидации (JSON Schema в YAML).
+# Расположение всех схем: репозиторий/schemas/ (этот каталог).
+# Проверка: redocly/yaml-json-schema или ajv-cli с конвертацией YAML→JSON при необходимости.
+
+version: 1
+description: >
+  Каждая запись связывает файл в репозитории с локальной схемой.
+  Пути instance относительно корня репозитория (родитель каталога schemas/).
+  Пути schema относительно каталога schemas/.
+
+schemas:
+  - id: docker-compose
+    instance: docker-compose.yml
+    schema: docker-compose.neomarket.schema.yaml
+    notes: Docker Compose Specification (фрагмент, заточен под сервисы NeoMarket).
+
+  - id: prometheus
+    instance: infra/prometheus.yml
+    schema: prometheus.neomarket.schema.yaml
+    notes: Конфигурация scrape для микросервисов NeoMarket.
+
+  - id: grafana-datasources
+    instance: infra/grafana/provisioning/datasources/datasources.yaml
+    schema: grafana-datasources.neomarket.schema.yaml
+    notes: Grafana provisioning API v1 — datasources.
+
+  - id: grafana-dashboards-provisioning
+    instance: infra/grafana/provisioning/dashboards/dashboards.yaml
+    schema: grafana-dashboards-provisioning.neomarket.schema.yaml
+    notes: Grafana provisioning API v1 — dashboard providers.
+
+  - id: api-gateway-routes
+    instance: uml/neomarket-api-gateway-routes.yml
+    schema: neomarket-api-gateway-routes.schema.yaml
+    notes: Документированное представление маршрутов (источник правды nginx — infra/nginx.conf).
+
+  - id: architecture-overview
+    instance: uml/neomarket-b2b-b2c-moderation-architecture.yml
+    schema: neomarket-architecture-document.schema.yaml
+    notes: Архитектурный YAML NeoMarket (домены, compose, интеграции, граф).
+
+  - id: openapi-b2b
+    instance: b2b/openapi.yaml
+    schema: openapi-3.0-neomarket-root.schema.yaml
+    notes: OpenAPI 3.0.x — общий каркас для контрактов проекта.
+
+  - id: openapi-b2b-extended
+    instance: b2b/openapi-extended.yaml
+    schema: openapi-3.0-neomarket-root.schema.yaml
+
+  - id: openapi-moderation
+    instance: moderation/openapi.yaml
+    schema: openapi-3.0-neomarket-root.schema.yaml
+
+  - id: openapi-b2c-catalog
+    instance: b2c/catalog/openapi.yaml
+    schema: openapi-3.0-neomarket-root.schema.yaml
+
+  - id: openapi-b2c-cart
+    instance: b2c/cart/openapi.yaml
+    schema: openapi-3.0-neomarket-root.schema.yaml
+
+  - id: openapi-b2c-orders
+    instance: b2c/orders/openapi.yaml
+    schema: openapi-3.0-neomarket-root.schema.yaml

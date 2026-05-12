@@ -128,6 +128,10 @@ function productStock(product) {
   return normalizeArray(product?.skus).reduce((sum, sku) => sum + Number(sku.active_quantity || 0), 0)
 }
 
+function productDisplayStatus(product) {
+  return product?.deleted ? 'REMOVED' : product?.status || 'UNKNOWN'
+}
+
 function parseCharacteristics(text) {
   return text
     .split('\n')
@@ -241,6 +245,7 @@ function StatusBadge({ status }) {
     BLOCKED: 'danger',
     HARD_BLOCKED: 'danger',
     ACCEPTED: 'success',
+    REMOVED: 'neutral',
   }[status] || 'neutral'
 
   return <span className={`status-badge ${tone}`}>{status}</span>
@@ -458,6 +463,30 @@ export default function App() {
 
   const announce = (type, text) => {
     setBanner({ type, text })
+  }
+
+  const handleHeaderNavigate = (target) => {
+    if (target === 'alerts') {
+      const pendingInvoices = overview?.pending_invoices || 0
+      const lowStock = normalizeArray(stats?.low_stock_skus).length
+      if (pendingInvoices > 0) {
+        setCurrentPage('supplies')
+        announce('success', `Открываю поставки: сейчас ждут приёмки ${pendingInvoices} поставок.`)
+        return
+      }
+      if (lowStock > 0) {
+        setCurrentPage('products')
+        announce('success', `Открываю товары: найдено ${lowStock} SKU с низким остатком.`)
+        return
+      }
+      setCurrentPage('overview')
+      announce('success', 'Новых уведомлений сейчас нет.')
+      return
+    }
+
+    if (target === 'supplies' || target === 'settings' || target === 'overview' || target === 'products') {
+      setCurrentPage(target)
+    }
   }
 
   const handleLogout = () => {
@@ -955,7 +984,7 @@ export default function App() {
                     <p>{product.category?.name || 'Без категории'}</p>
                   </div>
                   <div className="list-meta">
-                    <StatusBadge status={product.status} />
+                    <StatusBadge status={productDisplayStatus(product)} />
                     <span>{formatDate(product.updated_at)}</span>
                   </div>
                 </div>
@@ -1089,7 +1118,7 @@ export default function App() {
                     </p>
                   </div>
                   <div className="product-head-side">
-                    <StatusBadge status={product.status} />
+                    <StatusBadge status={productDisplayStatus(product)} />
                     <div className="button-row compact">
                       <button type="button" className="ghost-btn" onClick={() => toggleProductDetails(product)}>
                         {expandedProductId === product.id ? 'Скрыть SKU' : 'SKU и остатки'}
@@ -1566,6 +1595,7 @@ export default function App() {
       <Header
         activePage={currentPage}
         onMenuClick={() => setSidebarOpen((current) => !current)}
+        onNavigate={handleHeaderNavigate}
         onLogout={handleLogout}
         userInfo={userInfo}
         sellerId={sellerId}

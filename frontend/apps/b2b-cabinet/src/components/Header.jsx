@@ -17,6 +17,7 @@ export default function Header({
   activePage,
   alertsCount,
   onMenuClick,
+  onNavigate,
   onLogout,
   onSearchChange,
   searchQuery,
@@ -25,6 +26,11 @@ export default function Header({
 }) {
   const [showProfile, setShowProfile] = useState(false)
   const searchEnabled = activePage === 'products'
+
+  const navigate = (page) => {
+    setShowProfile(false)
+    onNavigate?.(page)
+  }
 
   return (
     <header className="b2b-header">
@@ -65,7 +71,7 @@ export default function Header({
 
         <div className="header-right">
           <div className="seller-chip">Seller ID: {shortId(sellerId)}</div>
-          <button className="icon-btn" title="Уведомления">
+          <button className="icon-btn" title="Уведомления" onClick={() => navigate('alerts')}>
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
               <path d="M13.73 21a2 2 0 0 1-3.46 0" />
@@ -92,21 +98,21 @@ export default function Header({
                   </div>
                 </div>
                 <div className="profile-divider"></div>
-                <button type="button" className="dropdown-item">
+                <button type="button" className="dropdown-item" onClick={() => navigate('settings')}>
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
                     <circle cx="12" cy="7" r="4" />
                   </svg>
                   Мой профиль
                 </button>
-                <button type="button" className="dropdown-item">
+                <button type="button" className="dropdown-item" onClick={() => navigate('supplies')}>
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <path d="M12 22C6.477 22 2 17.523 2 12s4.477-10 10-10 10 4.477 10 10-4.477 10-10 10z" />
                     <path d="M12 6v6l4 2" />
                   </svg>
                   История
                 </button>
-                <button type="button" className="dropdown-item">
+                <button type="button" className="dropdown-item" onClick={() => navigate('settings')}>
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <circle cx="12" cy="12" r="1" />
                     <circle cx="19" cy="12" r="1" />

@@ -488,6 +488,35 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+  b2b-moderation-consumer:
+    build:
+      context: ./services/b2b
+    container_name: neomarket-b2b-moderation-consumer
+    command: python manage.py consume_moderation_events
+    environment:
+      DJANGO_SETTINGS_MODULE: b2b_service.settings
+      SECRET_KEY: b2b-dev-secret
+      DEBUG: '1'
+      DB_NAME: b2b_db
+      DB_USER: neomarket
+      DB_PASSWORD: neomarket
+      DB_HOST: postgres
+      DB_PORT: '5432'
+      REDIS_URL: redis://redis:6379/0
+      EVENT_STREAM: neomarket.events
+      OTEL_ENABLED: 'true'
+      JAEGER_ENABLED: 'true'
+      JAEGER_HOST: jaeger:6831
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      LOG_LEVEL: DEBUG
+    volumes:
+    - ./services/b2b:/app
+    - ./infra:/app/infra:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
   moderation-outbox:
     build:
       context: ./services/moderation

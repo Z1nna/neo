@@ -12,6 +12,7 @@ class CreateOrderRequestSerializer(serializers.Serializer):
     idempotency_key = serializers.UUIDField()
     items = OrderItemRequestSerializer(many=True, min_length=1)
     delivery_address = serializers.CharField(max_length=500, allow_blank=True, required=False)
+    promo_code = serializers.CharField(max_length=32, allow_blank=True, required=False, default='')
 
 
 class CancelOrderRequestSerializer(serializers.Serializer):

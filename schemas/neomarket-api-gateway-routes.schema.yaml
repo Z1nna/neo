@@ -1,0 +1,70 @@
+# JSON Schema (YAML) для uml/neomarket-api-gateway-routes.yml
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://neomarket.local/schemas/neomarket-api-gateway-routes.schema.yaml
+title: NeoMarket API Gateway routes (YAML mirror of nginx)
+type: object
+required: [gateway, routes]
+additionalProperties: true
+properties:
+  gateway:
+    type: object
+    required: [host_port, health, blocked]
+    additionalProperties: true
+    properties:
+      host_port:
+        oneOf:
+          - type: integer
+            minimum: 1
+            maximum: 65535
+          - type: string
+            pattern: "^[0-9]+$"
+      health:
+        type: object
+        required: [path, behavior]
+        additionalProperties: true
+        properties:
+          path: { type: string, pattern: "^/" }
+          behavior: { type: string }
+      blocked:
+        type: array
+        items:
+          type: object
+          required: [path, response]
+          additionalProperties: true
+          properties:
+            path: { type: string, pattern: "^/" }
+            response:
+              oneOf:
+                - type: integer
+                  minimum: 100
+                  maximum: 599
+                - type: string
+                  pattern: "^[0-9]+$"
+  routes:
+    type: array
+    minItems: 1
+    items:
+      type: object
+      required:
+        - prefix
+        - upstream_service
+        - upstream_host_port
+      additionalProperties: false
+      properties:
+        prefix: { type: string, minLength: 1 }
+        upstream_service: { type: string, minLength: 1 }
+        upstream_host_port:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]*:[0-9]+$"
+        rate_limit_zone: { type: string }
+        path_strip: { type: boolean }
+        path_rewrite: { type: string }
+        requires:
+          type: array
+          items: { type: string }
+        forwarded_headers:
+          type: array
+          items: { type: string }
+        injects_upstream_headers:
+          type: object
+          additionalProperties: { type: string }

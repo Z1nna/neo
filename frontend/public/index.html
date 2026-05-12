@@ -14,31 +14,51 @@
   <div class="bg-glow bg-glow-a"></div>
   <div class="bg-glow bg-glow-b"></div>
 
-  <header class="topbar">
-    <div class="brand-wrap">
-      <div class="brand-mark">NM</div>
-      <div class="brand-copy">
-        <h1>NeoMarket</h1>
-        <p>Маркетплейс в одном окне: витрина, оформление, кабинет и отдельный режим модерации</p>
-      </div>
-    </div>
+  <div class="shell">
+    <header class="site-header">
+      <div class="topbar">
+        <div class="brand-wrap">
+          <div class="brand-mark">NM</div>
+          <div class="brand-copy">
+            <h1>NeoMarket</h1>
+            <p class="muted brand-tagline">Товары с доставкой · скидки по промокодам · как на крупном маркетплейсе</p>
+          </div>
+        </div>
 
-    <div class="card identity-panel role-customer role-moderation">
-      <div class="identity-panel-head">
-        <div>
-          <h2>Аккаунт</h2>
-          <p id="authHint" class="muted">Вход и регистрация теперь открываются на отдельной странице. Для входа нужны только почта и пароль.</p>
-        </div>
-        <div class="auth-actions">
-          <button id="authLoginBtn" type="button" class="btn btn-primary">Войти</button>
-          <button id="authRegisterBtn" type="button" class="btn btn-ghost">Регистрация</button>
-          <button id="authLogoutBtn" type="button" class="btn btn-ghost">Выйти</button>
-          <button id="refreshAll" type="button" class="btn btn-ghost">Обновить данные</button>
+        <div class="card identity-panel identity-panel--compact">
+          <div class="identity-panel-head identity-panel-head--tight">
+            <div class="identity-panel-titles">
+              <h2 class="role-customer account-panel-title">Покупатель</h2>
+              <h2 class="role-moderation" style="display:none">Модератор</h2>
+              <p id="authHint" class="muted role-customer account-panel-hint">Вход на отдельной странице.</p>
+              <p class="muted role-moderation account-panel-hint" style="display:none">Карточки и Q&amp;A.</p>
+            </div>
+            <div class="auth-actions auth-actions--tight">
+              <span class="role-customer auth-actions-inline">
+                <button id="authLoginBtn" type="button" class="btn btn-primary btn--xs">Войти</button>
+                <button id="authRegisterBtn" type="button" class="btn btn-ghost btn--xs">Регистрация</button>
+              </span>
+              <button id="authLogoutBtn" type="button" class="btn btn-ghost btn--xs">Выйти</button>
+              <button id="refreshAll" type="button" class="btn btn-ghost btn--xs" title="Обновить данные">Обновить</button>
+            </div>
+          </div>
+          <p id="authState" class="muted identity-auth-state"></p>
         </div>
       </div>
-      <p id="authState" class="muted"></p>
-    </div>
-  </header>
+
+      <section
+        class="site-hero-carousel card topbar-promo role-customer"
+        id="topbarPromo"
+        aria-roledescription="carousel"
+        aria-label="Подборки: самолёт, авто, дом, вертолёт"
+      >
+        <button type="button" class="topbar-promo__arrow topbar-promo__arrow--prev" id="topbarPromoPrev" aria-label="Предыдущий баннер">‹</button>
+        <div class="topbar-promo__viewport">
+          <div class="topbar-promo__slides" id="topbarPromoSlides"></div>
+        </div>
+        <button type="button" class="topbar-promo__arrow topbar-promo__arrow--next" id="topbarPromoNext" aria-label="Следующий баннер">›</button>
+      </section>
+    </header>
 
   <nav class="tabs">
     <button id="tab-home" class="tab active role-customer" data-tab="home">Главная</button>
@@ -52,7 +72,37 @@
   <main>
     <section id="home" class="panel active role-customer">
       <div class="home-layout">
-        <section class="card hero-banner" id="heroBanners"></section>
+        <section class="polina-promo-hero role-customer" id="polinaPromoHero" aria-label="Акция: промокод Polina">
+          <div class="polina-promo-hero__inner">
+            <div class="polina-promo-hero__pill" aria-hidden="true">−30%</div>
+            <div class="polina-promo-hero__content">
+              <p class="polina-promo-hero__kicker">Акция NeoMarket</p>
+              <h2 class="polina-promo-hero__title">Промокод <span class="polina-code">POLINA</span> — скидка 30% на заказ</h2>
+              <p class="polina-promo-hero__sub">Можно ввести <strong>POLINA</strong> или <strong>Полина</strong> (кириллица). На вкладке «Оформление» нажмите «Применить промокод» перед оплатой.</p>
+            </div>
+            <div class="polina-promo-hero__cta">
+              <button type="button" class="btn polina-promo-hero__btn" id="polinaBannerGoCheckout">К оформлению</button>
+              <button type="button" class="btn btn-ghost polina-promo-hero__ghost" id="polinaBannerPrefill">Подставить POLINA</button>
+            </div>
+          </div>
+        </section>
+
+        <div id="heroBannersWrap" class="hero-banners-wrap" style="display: none;">
+          <section class="card hero-banner" id="heroBanners"></section>
+        </div>
+
+        <section class="card promos-home" id="promosHomeSection">
+          <div class="panel-head">
+            <h2>Промокоды</h2>
+            <button type="button" id="goPromoCheckoutBtn" class="btn btn-primary">К оформлению</button>
+          </div>
+          <p class="muted">Введите код на вкладке «Оформление» и нажмите «Применить промокод» — скидка учтётся в сумме заказа при оплате.</p>
+          <ul class="promo-list">
+            <li><strong>POLINA</strong> или <strong>Полина</strong> — скидка <strong>30%</strong> на сумму корзины</li>
+            <li><strong>WELCOME10</strong> — скидка 10%</li>
+            <li><strong>SAVE300</strong> — 300 ₽ при заказе от 3000 ₽</li>
+          </ul>
+        </section>
 
         <section class="card">
           <div class="panel-head">
@@ -102,48 +152,9 @@
             <h2>Товары</h2>
             <span id="productsMeta" class="muted"></span>
           </div>
+          <p class="muted catalog-hint">Откройте карточку товара в отдельной странице — клик по области карточки (кроме кнопок и списка SKU).</p>
           <div id="productsGrid" class="products-grid"></div>
         </section>
-
-        <aside class="card product-details-panel">
-          <div class="panel-head">
-            <h2>Карточка товара</h2>
-            <button id="openCatalogFromDetails" class="btn btn-ghost">Сбросить</button>
-          </div>
-          <div id="productDetails" class="product-details muted">Выберите товар, чтобы увидеть галерею, характеристики, рейтинг и Q&A.</div>
-
-          <div class="divider"></div>
-          <h3 class="subhead">Рейтинг и отзывы</h3>
-          <div id="reviewsSummary" class="muted"></div>
-          <div id="reviewsList" class="reviews-list"></div>
-
-          <div class="field">
-            <label for="reviewRating">Ваша оценка</label>
-            <select id="reviewRating">
-              <option value="5">5</option>
-              <option value="4">4</option>
-              <option value="3">3</option>
-              <option value="2">2</option>
-              <option value="1">1</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="reviewText">Текст отзыва</label>
-            <textarea id="reviewText" rows="3" placeholder="Что понравилось или что стоит улучшить"></textarea>
-          </div>
-          <button id="submitReviewBtn" class="btn btn-primary" disabled>Оставить отзыв</button>
-          <p id="reviewMsg" class="muted"></p>
-
-          <div class="divider"></div>
-          <h3 class="subhead">Q&amp;A</h3>
-          <div id="qaList" class="qa-list"></div>
-          <div class="field">
-            <label for="qaQuestionInput">Ваш вопрос о товаре</label>
-            <textarea id="qaQuestionInput" rows="2" placeholder="Например: подходит ли для iOS?" ></textarea>
-          </div>
-          <button id="askQuestionBtn" class="btn btn-ghost" disabled>Задать вопрос</button>
-          <p id="qaMsg" class="muted"></p>
-        </aside>
       </div>
     </section>
 
@@ -201,7 +212,7 @@
 
           <div class="field">
             <label for="promoCodeInput">Промокод</label>
-            <input id="promoCodeInput" type="text" placeholder="WELCOME10" />
+            <input id="promoCodeInput" type="text" placeholder="POLINA, Полина или WELCOME10" autocomplete="off" />
           </div>
           <div class="auth-actions">
             <button id="applyPromoBtn" class="btn btn-ghost">Применить промокод</button>
@@ -279,6 +290,10 @@
             </div>
           </div>
           <div id="profileInfo" class="profile-info"></div>
+          <div class="divider"></div>
+          <h2 class="subhead">Избранное</h2>
+          <p class="muted">Все товары, которые вы добавляли в избранное с витрины и со страницы товара.</p>
+          <div id="accountFavoritesList" class="favorites-list"></div>
           <div class="divider"></div>
           <div id="ordersList" class="orders-list"></div>
         </div>
@@ -368,10 +383,12 @@
       <select class="sku-select"></select>
       <div class="product-actions">
         <button class="btn btn-primary add-cart-btn">В корзину</button>
-        <button class="btn btn-ghost details-btn">Описание</button>
+        <button class="btn btn-ghost details-btn">Подробнее</button>
       </div>
     </article>
   </template>
+
+  </div>
 
   <script src="./app.js" type="module"></script>
 </body>

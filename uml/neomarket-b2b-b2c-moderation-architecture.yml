@@ -1,0 +1,576 @@
+# =============================================================================
+# NeoMarket — полная архитектурная YAML-схема (B2B, B2C, Moderation + весь стек)
+# Источники: docker-compose.yml, infra/nginx.conf, infra/postgres/init-multiple-dbs.sql
+# =============================================================================
+
+meta:
+  project: NeoMarket
+  schema_version: "2.0"
+  description: >
+    Микросервисный маркетплейс: кабинет продавца (B2B), витрина и заказ (B2C),
+    модерация карточек товара, оплаты, логистика, отзывы, промо, антифрод.
+  sources_of_truth:
+    - docker-compose.yml
+    - infra/nginx.conf
+    - infra/postgres/init-multiple-dbs.sql
+    - services/*/settings.py
+  public_api_base: "http://localhost:8888"
+  internal_service_network: docker_compose_default
+  redis_event_stream: neomarket.events
+
+# -----------------------------------------------------------------------------
+# Домены и границы
+# -----------------------------------------------------------------------------
+domains:
+  b2b:
+    name: Кабинет продавца
+    actors: [seller]
+    responsibilities:
+      - CRUD товаров, SKU, категорий, поставок, счетов, резервов, профиля продавца
+      - Статусы товара и блокировки по решению модерации
+      - Публикация доменных событий в Redis Stream (паттерн transactional outbox)
+      - Приём решений модерации (service-to-service), идемпотентность IntegrationInbox
+    product_statuses:
+      - CREATED
+      - ON_MODERATION
+      - MODERATED
+      - BLOCKED
+      - HARD_BLOCKED
+    openapi:
+      - path: b2b/openapi.yaml
+      - path: b2b/openapi-extended.yaml
+    django_app: services/b2b/b2b_api
+
+  b2c:
+    name: Витрина и покупательский путь
+    actors: [buyer]
+    responsibilities:
+      - Каталог (read-модель; sync с B2B при старте + проекция из событий)
+      - Корзина, избранное, главная, коллекции, баннеры, product events (cart-сервис)
+      - Заказы, валидация корзины, доменные события
+      - Платежи, логистика, отзывы, промокоды, антифрод
+    openapi:
+      - path: b2c/catalog/openapi.yaml
+      - path: b2c/cart/openapi.yaml
+      - path: b2c/orders/openapi.yaml
+    django_apps:
+      - services/catalog/catalog_api
+      - services/cart/cart_api
+      - services/orders/orders_api
+
+  moderation:
+    name: Модерация товаров
+    actors: [moderator]
+    responsibilities:
+      - Очередь ModerationCard (queue_status)
+      - Потребление событий B2B (worker) → enqueue карточек
+      - Approve / Decline через API; outbox событий для B2B consumer
+    moderation_card_queue_status:
+      - PENDING
+      - IN_REVIEW
+      - APPROVED
+      - DECLINED
+    moderation_card_event_type:
+      - CREATED
+      - UPDATED
+    openapi:
+      - path: moderation/openapi.yaml
+    django_app: services/moderation/moderation_api
+
+# -----------------------------------------------------------------------------
+# Базы данных (Postgres, отдельная схема на сервис)
+# -----------------------------------------------------------------------------
+databases:
+  list:
+    - name: catalog_db
+      service: catalog
+    - name: cart_db
+      service: cart
+    - name: orders_db
+      service: orders
+    - name: moderation_db
+      service: moderation
+    - name: b2b_db
+      service: b2b
+    - name: auth_db
+      service: auth
+    - name: payments_db
+      service: payments
+    - name: logistics_db
+      service: logistics
+    - name: reviews_db
+      service: reviews
+    - name: promo_db
+      service: promo
+    - name: antifraud_db
+      service: antifraud
+  init_script: infra/postgres/init-multiple-dbs.sql
+  container: neomarket-postgres
+  host_port: 5432
+
+# -----------------------------------------------------------------------------
+# Redis: стримы, группы потребителей, Celery (по compose)
+# -----------------------------------------------------------------------------
+redis:
+  container: neomarket-redis
+  host_port: 6379
+  streams:
+    neomarket.events:
+      description: Общий поток доменных / интеграционных событий
+      default_env_key: EVENT_STREAM
+      producers_outbox:
+        - service: b2b
+          worker: b2b-outbox
+          command: publish_outbox_events
+        - service: moderation
+          worker: moderation-outbox
+          command: publish_outbox_events
+        - service: orders
+          worker: orders-outbox
+          command: publish_outbox_events
+        - service: payments
+          worker: payments-outbox
+          command: publish_outbox_events
+      consumers:
+        - worker: moderation-worker
+          service: moderation
+          command: consume_b2b_events
+          env:
+            MODERATION_EVENTS_STREAM: neomarket.events
+            MODERATION_EVENTS_GROUP: moderation
+            MODERATION_EVENTS_CONSUMER: "moderation-api | moderation-worker"
+        - worker: b2b-moderation-consumer
+          service: b2b
+          command: consume_moderation_events
+        - worker: catalog-projection
+          service: catalog
+          command: consume_domain_events
+          env:
+            EVENT_STREAM: neomarket.events
+            EVENT_GROUP: catalog
+            EVENT_CONSUMER: catalog-projection
+        - worker: orders-consumer
+          service: orders
+          command: consume_domain_events
+          env:
+            EVENT_STREAM: neomarket.events
+            EVENT_GROUP: orders
+            EVENT_CONSUMER: "orders-1 | orders-consumer"
+  celery_broker_backends_by_service:
+    note: Разные DB index на одном Redis для изоляции брокеров/результатов
+    catalog:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    cart:
+      CELERY_BROKER_URL: redis://redis:6379/2
+      CELERY_RESULT_BACKEND: redis://redis:6379/3
+    orders:
+      CELERY_BROKER_URL: redis://redis:6379/4
+      CELERY_RESULT_BACKEND: redis://redis:6379/5
+
+# -----------------------------------------------------------------------------
+# API Gateway (Nginx)
+# -----------------------------------------------------------------------------
+api_gateway:
+  technology: nginx
+  container: neomarket-api-gateway
+  host_port: 8888
+  internal_port: 80
+  config_file: infra/nginx.conf
+  dockerfile: infra/Dockerfile.gateway
+  health_path: /health
+  special_behaviors:
+    b2b:
+      requires_header: Authorization
+      path_rewrite: "^/api/v1/b2b/(.*) -> /api/v1/$1"
+    payments:
+      requires_header: Authorization
+      path_rewrite: "^/api/v1/payments/(.*) -> /api/v1/$1"
+    catalog:
+      injects_header_to_upstream: "X-Service-Key: neomarket-internal-key"
+      path_rewrite: "^/api/v1/catalog/(.*) -> /api/v1/$1"
+    orders_cart_promo_logistics_reviews_antifraud:
+      notes: Часть location прокидывает X-User-ID с клиента
+  upstreams:
+    auth: auth:8000
+    b2b: b2b:8000
+    payments: payments:8000
+    logistics: logistics:8000
+    reviews: reviews:8000
+    promo: promo:8000
+    catalog: catalog:8000
+    moderation: moderation:8000
+    orders: orders:8000
+    cart: cart:8000
+    antifraud: antifraud:8000
+  location_prefix_to_service:
+    /health: gateway_static
+    /admin: blocked_403
+    /api/v1/auth/: auth
+    /api/v1/b2b/: b2b
+    /api/v1/payments/: payments
+    /api/v1/orders/: orders
+    /api/v1/cart/: cart
+    /api/v1/favorites/: cart
+    /api/v1/home/: cart
+    /api/v1/main/: cart
+    /api/v1/collections/: cart
+    /api/v1/banner-events: cart
+    /api/v1/events/product: cart
+    /api/v1/catalog/: catalog
+    /api/v1/reviews/: reviews
+    /api/v1/promo/: promo
+    /api/v1/logistics/: logistics
+    /api/v1/moderation/: moderation
+    /api/v1/antifraud/: antifraud
+    /docs/: catalog
+    /: not_found_404
+
+# -----------------------------------------------------------------------------
+# Все процессы из docker-compose (HTTP-сервисы, воркеры, UI, наблюдаемость)
+# -----------------------------------------------------------------------------
+compose_processes:
+  datastores:
+    postgres:
+      container: neomarket-postgres
+      image: postgres:16-alpine
+      ports: ["5432:5432"]
+    redis:
+      container: neomarket-redis
+      image: redis:7-alpine
+      ports: ["6379:6379"]
+  http_services:
+    - name: catalog
+      container: neomarket-catalog
+      context: ./services/catalog
+      host_port: 8001
+      internal_port: 8000
+      command: migrate + sync_b2b_catalog + runserver
+      depends_on: [b2b, postgres, redis]
+      notable_env:
+        B2B_PRODUCTS_URL: http://b2b:8000/api/v1/products
+        INTERNAL_SERVICE_KEY: neomarket-internal-key
+    - name: cart
+      container: neomarket-cart
+      host_port: 8002
+      depends_on: [postgres, redis]
+      notable_env:
+        CATALOG_PRODUCTS_URL: http://catalog:8000/api/v1/products
+        JWT_ISSUER: https://auth.neomarket.local
+    - name: orders
+      container: neomarket-orders
+      host_port: 8003
+      depends_on: [postgres, redis]
+      notable_env:
+        CART_VALIDATE_URL: http://cart:8000/api/v1/cart/validate
+    - name: moderation
+      container: neomarket-moderation
+      host_port: 8004
+      depends_on: [postgres, redis]
+    - name: b2b
+      container: neomarket-b2b
+      host_port: 8005
+      depends_on: [postgres, redis]
+      notable_env:
+        EVENT_STREAM: neomarket.events
+    - name: auth
+      container: neomarket-auth
+      host_port: 8006
+      depends_on: [postgres]
+    - name: payments
+      container: neomarket-payments
+      host_port: 8007
+      depends_on: [postgres, redis]
+    - name: logistics
+      container: neomarket-logistics
+      host_port: 8008
+      depends_on: [postgres]
+    - name: reviews
+      container: neomarket-reviews
+      host_port: 8009
+      depends_on: [postgres]
+    - name: promo
+      container: neomarket-promo
+      host_port: 8010
+      depends_on: [postgres]
+    - name: antifraud
+      container: neomarket-antifraud
+      host_port: 8011
+      depends_on: [postgres]
+    - name: api_gateway
+      container: neomarket-api-gateway
+      host_port: 8888
+      depends_on: [b2b, payments, logistics, reviews, promo, catalog, moderation, orders, cart, auth, antifraud]
+  workers:
+    - name: moderation-worker
+      container: neomarket-moderation-worker
+      context: ./services/moderation
+      command: consume_b2b_events
+    - name: b2b-outbox
+      container: neomarket-b2b-outbox
+      context: ./services/b2b
+      command: loop publish_outbox_events
+    - name: b2b-moderation-consumer
+      container: neomarket-b2b-moderation-consumer
+      context: ./services/b2b
+      command: consume_moderation_events
+    - name: moderation-outbox
+      container: neomarket-moderation-outbox
+      context: ./services/moderation
+      command: loop publish_outbox_events
+    - name: catalog-projection
+      container: neomarket-catalog-projection
+      context: ./services/catalog
+      command: consume_domain_events
+    - name: orders-consumer
+      container: neomarket-orders-consumer
+      context: ./services/orders
+      command: consume_domain_events
+    - name: orders-outbox
+      container: neomarket-orders-outbox
+      context: ./services/orders
+      command: loop publish_outbox_events
+    - name: payments-outbox
+      container: neomarket-payments-outbox
+      context: ./services/payments
+      command: loop publish_outbox_events
+  frontends:
+    - name: b2b-cabinet
+      container: neomarket-b2b-cabinet
+      context: ./frontend/apps/b2b-cabinet
+      host_port: 5176
+      env:
+        VITE_API_URL: http://localhost:8888/api/v1
+    - name: frontend
+      container: neomarket-frontend
+      context: ./frontend
+      host_port: 8080
+  observability:
+    - name: jaeger
+      container: neomarket-jaeger
+      ports: ["6831:6831/udp", "16686:16686", "4317:4317"]
+    - name: prometheus
+      container: neomarket-prometheus
+      host_port: 9090
+      config: infra/prometheus.yml
+    - name: grafana
+      container: neomarket-grafana
+      host_port: 3000
+    - name: loki
+      container: neomarket-loki
+      host_port: 3100
+  volumes:
+    - postgres_data
+    - prometheus_data
+    - grafana_data
+    - loki_data
+
+# -----------------------------------------------------------------------------
+# Синхронные HTTP-зависимости между сервисами (из env compose)
+# -----------------------------------------------------------------------------
+sync_http_integrations:
+  - from: catalog
+    to: b2b
+    purpose: Начальная синхронизация каталога и чтение продуктов
+    env: B2B_PRODUCTS_URL
+  - from: cart
+    to: catalog
+    purpose: Данные товара/SKU для корзины
+    env: CATALOG_PRODUCTS_URL
+  - from: orders
+    to: cart
+    purpose: Валидация корзины при оформлении
+    env: CART_VALIDATE_URL
+  - from: gateway
+    to: catalog
+    purpose: Прокси /docs на каталог
+    path: /docs/
+
+# -----------------------------------------------------------------------------
+# Сквозные потоки: B2B ↔ Moderation ↔ B2C (товар)
+# -----------------------------------------------------------------------------
+integration_flows:
+  product_publish_pipeline:
+    description: От создания товара продавцом до появления в публичном каталоге
+    steps:
+      - id: 1
+        actor: seller
+        via: api_gateway
+        target: b2b
+        action: Создание/обновление товара
+      - id: 2
+        component: b2b-outbox
+        action: Запись события в Redis Stream neomarket.events
+      - id: 3
+        component: moderation-worker
+        action: consume_b2b_events → очередь ModerationCard
+      - id: 4
+        actor: moderator
+        via: api_gateway
+        target: moderation
+        action: get-next / approve / decline
+      - id: 5
+        component: moderation-outbox
+        action: Публикация решения в stream
+      - id: 6
+        component: b2b-moderation-consumer
+        action: consume_moderation_events → обновление Product в b2b_db
+      - id: 7
+        component: b2b-outbox
+        action: Событие обновления товара в stream (после решения)
+      - id: 8
+        component: catalog-projection
+        action: consume_domain_events → обновление read-модели catalog_db
+      - id: 9
+        actor: buyer
+        via: api_gateway
+        target: catalog
+        action: GET каталог (публичный API)
+    supplemental:
+      catalog_startup: Команда sync_b2b_catalog при старте контейнера catalog
+
+  b2c_order_pipeline:
+    description: Покупательский путь
+    steps:
+      - catalog browse
+      - cart mutations
+      - orders create
+      - payments (отдельный сервис; события через outbox в stream)
+      - logistics / reviews / promo / antifraud по необходимости
+
+# -----------------------------------------------------------------------------
+# JWT / Auth (общие переменные в compose)
+# -----------------------------------------------------------------------------
+security_jwt:
+  issuer: https://auth.neomarket.local
+  audience: neomarket-services
+  algorithm: HS256
+  signing_secret_env: JWT_SECRET / JWT_SIGNING_KEY
+  services_using_jwt:
+    - cart
+    - orders
+    - moderation
+    - b2b
+
+# -----------------------------------------------------------------------------
+# Фронтенд-приложения (исходники)
+# -----------------------------------------------------------------------------
+frontend_source_apps:
+  - path: frontend/apps/b2b-cabinet
+    domain: b2b
+  - path: frontend/apps/moderation
+    domain: moderation
+  - path: frontend
+    domain: b2c
+    note: Корневой storefront + статика
+
+# -----------------------------------------------------------------------------
+# Граф для визуализации (узлы и рёбра)
+# -----------------------------------------------------------------------------
+dependency_graph:
+  nodes:
+    - { id: postgres, type: datastore }
+    - { id: redis, type: datastore }
+    - { id: api_gateway, type: gateway }
+    - { id: auth, type: service }
+    - { id: b2b, type: service }
+    - { id: moderation, type: service }
+    - { id: catalog, type: service }
+    - { id: cart, type: service }
+    - { id: orders, type: service }
+    - { id: payments, type: service }
+    - { id: logistics, type: service }
+    - { id: reviews, type: service }
+    - { id: promo, type: service }
+    - { id: antifraud, type: service }
+    - { id: b2b-outbox, type: worker }
+    - { id: b2b-moderation-consumer, type: worker }
+    - { id: moderation-worker, type: worker }
+    - { id: moderation-outbox, type: worker }
+    - { id: catalog-projection, type: worker }
+    - { id: orders-consumer, type: worker }
+    - { id: orders-outbox, type: worker }
+    - { id: payments-outbox, type: worker }
+  edges:
+    - { from: api_gateway, to: auth, protocol: http }
+    - { from: api_gateway, to: b2b, protocol: http }
+    - { from: api_gateway, to: moderation, protocol: http }
+    - { from: api_gateway, to: catalog, protocol: http }
+    - { from: api_gateway, to: cart, protocol: http }
+    - { from: api_gateway, to: orders, protocol: http }
+    - { from: api_gateway, to: payments, protocol: http }
+    - { from: api_gateway, to: logistics, protocol: http }
+    - { from: api_gateway, to: reviews, protocol: http }
+    - { from: api_gateway, to: promo, protocol: http }
+    - { from: api_gateway, to: antifraud, protocol: http }
+    - { from: catalog, to: b2b, protocol: http, label: B2B_PRODUCTS_URL }
+    - { from: cart, to: catalog, protocol: http, label: CATALOG_PRODUCTS_URL }
+    - { from: orders, to: cart, protocol: http, label: CART_VALIDATE_URL }
+    - { from: b2b, to: postgres, protocol: tcp }
+    - { from: moderation, to: postgres, protocol: tcp }
+    - { from: catalog, to: postgres, protocol: tcp }
+    - { from: cart, to: postgres, protocol: tcp }
+    - { from: orders, to: postgres, protocol: tcp }
+    - { from: payments, to: postgres, protocol: tcp }
+    - { from: logistics, to: postgres, protocol: tcp }
+    - { from: reviews, to: postgres, protocol: tcp }
+    - { from: promo, to: postgres, protocol: tcp }
+    - { from: antifraud, to: postgres, protocol: tcp }
+    - { from: auth, to: postgres, protocol: tcp }
+    - { from: b2b-outbox, to: redis, label: XADD stream }
+    - { from: moderation-outbox, to: redis, label: XADD stream }
+    - { from: orders-outbox, to: redis, label: XADD stream }
+    - { from: payments-outbox, to: redis, label: XADD stream }
+    - { from: redis, to: moderation-worker, label: XREADGROUP moderation }
+    - { from: redis, to: b2b-moderation-consumer, label: moderation decisions }
+    - { from: redis, to: catalog-projection, label: XREADGROUP catalog }
+    - { from: redis, to: orders-consumer, label: XREADGROUP orders }
+
+# -----------------------------------------------------------------------------
+# Mermaid (вставка в документацию или VS Code Mermaid preview)
+# -----------------------------------------------------------------------------
+mermaid_flowchart: |
+  flowchart TB
+    subgraph GW["API Gateway :8888"]
+      NG[nginx]
+    end
+    subgraph Core["Сервисы"]
+      A[auth :8006]
+      B[b2b :8005]
+      M[moderation :8004]
+      C[catalog :8001]
+      K[cart :8002]
+      O[orders :8003]
+      P[payments :8007]
+      L[logistics :8008]
+      R[reviews :8009]
+      Pr[promo :8010]
+      Af[antifraud :8011]
+    end
+    subgraph W["Воркеры / outbox"]
+      BO[b2b-outbox]
+      BM[b2b-moderation-consumer]
+      MW[moderation-worker]
+      MO[moderation-outbox]
+      CP[catalog-projection]
+      OC[orders-consumer]
+      OO[orders-outbox]
+      PO[payments-outbox]
+    end
+    subgraph DS["Данные"]
+      PG[(Postgres)]
+      RD[(Redis neomarket.events)]
+    end
+    NG --> A & B & M & C & K & O & P & L & R & Pr & Af
+    B & M & C & K & O & P & L & R & Pr & Af & A --> PG
+    B --> BO --> RD
+    M --> MO --> RD
+    O --> OO --> RD
+    P --> PO --> RD
+    RD --> MW --> M
+    RD --> BM --> B
+    RD --> CP --> C
+    RD --> OC --> O
+    C -.HTTP.-> B
+    K -.HTTP.-> C
+    O -.HTTP.-> K

@@ -26,7 +26,11 @@ def parse_event(message_fields: dict) -> dict:
     }
 
     payload = _parse_event_payload(normalized)
-    product_id = normalized.get("product_id") or payload.get("product_id")
+    product_id = (
+        normalized.get("product_id")
+        or payload.get("product_id")
+        or normalized.get("aggregate_id")
+    )
     raw_event_type = normalized.get("event_type")
     payload_event_type = payload.get("event_type")
     if raw_event_type in {"PRODUCT_CREATED", "PRODUCT_UPDATED", "PRODUCT_DELETED"} and payload_event_type:
@@ -38,6 +42,7 @@ def parse_event(message_fields: dict) -> dict:
     snapshot_after = payload.get("snapshot_after")
 
     return {
+        "source": normalized.get("source"),
         "product_id": product_id,
         "event_type": event_type,
         "snapshot_before": snapshot_before,
@@ -65,8 +70,34 @@ def fetch_b2b_snapshot(product_id):
         return None
 
 
+def _open_cards_queryset(product_id):
+    return ModerationCard.objects.filter(
+        product_id=product_id,
+        queue_status__in=[
+            ModerationCard.QueueStatus.PENDING,
+            ModerationCard.QueueStatus.IN_REVIEW,
+        ],
+    ).order_by("created_at", "id")
+
+
+def _has_live_skus(snapshot):
+    skus = snapshot.get("skus") or []
+    return any(not bool(sku.get("deleted")) for sku in skus if isinstance(sku, dict))
+
+
+def _requires_moderation(snapshot):
+    return snapshot.get("status") == "ON_MODERATION" and _has_live_skus(snapshot)
+
+
+def _delete_open_cards(product_id):
+    _open_cards_queryset(product_id).delete()
+
+
 def enqueue_from_event(event: dict):
     if not event.get("product_id"):
+        return None
+
+    if event.get("source") not in {None, "", "b2b"}:
         return None
 
     try:
@@ -76,17 +107,47 @@ def enqueue_from_event(event: dict):
 
     event_type = event.get("event_type", "UPDATED")
     if event_type == "DELETED":
-        ModerationCard.objects.filter(product_id=product_id, queue_status__in=[
-            ModerationCard.QueueStatus.PENDING,
-            ModerationCard.QueueStatus.IN_REVIEW,
-        ]).delete()
+        _delete_open_cards(product_id)
         return None
     if event_type not in {ModerationCard.EventType.CREATED, ModerationCard.EventType.UPDATED}:
         event_type = ModerationCard.EventType.UPDATED
 
     snapshot_after = event.get("snapshot_after") or fetch_b2b_snapshot(product_id) or {"id": str(product_id)}
-    if event_type == ModerationCard.EventType.CREATED and not (snapshot_after.get("skus") or []):
+    if not _requires_moderation(snapshot_after):
+        _delete_open_cards(product_id)
         return None
+
+    existing_cards = list(_open_cards_queryset(product_id))
+    if existing_cards:
+        card = existing_cards[0]
+        card.event_type = event_type
+        card.queue_status = ModerationCard.QueueStatus.PENDING
+        card.snapshot_before = event.get("snapshot_before")
+        card.snapshot_after = snapshot_after
+        card.assigned_to = None
+        card.decided_by = None
+        card.decided_at = None
+        card.decline_reason = None
+        card.decline_comment = ""
+        card.decline_fields = []
+        card.save(
+            update_fields=[
+                "event_type",
+                "queue_status",
+                "snapshot_before",
+                "snapshot_after",
+                "assigned_to",
+                "decided_by",
+                "decided_at",
+                "decline_reason",
+                "decline_comment",
+                "decline_fields",
+                "updated_at",
+            ]
+        )
+        for duplicate in existing_cards[1:]:
+            duplicate.delete()
+        return card
 
     return ModerationCard.objects.create(
         product_id=product_id,

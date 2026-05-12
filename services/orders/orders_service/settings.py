@@ -88,6 +88,7 @@ B2B_RESERVE_URL = os.getenv('B2B_RESERVE_URL', 'http://b2b:8000/api/v1/reserve')
 B2B_UNRESERVE_URL = os.getenv('B2B_UNRESERVE_URL', 'http://b2b:8000/api/v1/unreserve')
 B2B_FULFILL_URL = os.getenv('B2B_FULFILL_URL', 'http://b2b:8000/api/v1/fulfill')
 B2B_TIMEOUT = float(os.getenv('B2B_TIMEOUT', '3.0'))
+PROMO_APPLY_URL = os.getenv('PROMO_APPLY_URL', 'http://promo:8000/api/v1/promo/apply/')
 
 JWT_ALGORITHM = os.getenv('JWT_ALGORITHM', 'HS256')
 JWT_SECRET = os.getenv('JWT_SECRET', SECRET_KEY)

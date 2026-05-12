@@ -43,9 +43,10 @@ class Command(BaseCommand):
                             continue
 
                         event = parse_event(fields)
+                        event_source = event.get('source') or 'unknown'
                         IntegrationInbox.objects.create(
                             message_id=msg,
-                            source='b2b',
+                            source=event_source,
                             event_type=event.get('event_type', 'UPDATED'),
                             payload=event,
                         )
@@ -62,7 +63,9 @@ class Command(BaseCommand):
 
     def _ensure_group(self, redis_client, stream, group):
         try:
-            redis_client.xgroup_create(name=stream, groupname=group, id="$", mkstream=True)
+            # id='0' — читать с начала стрима для новой группы. id='$' отрезает все сообщения,
+            # уже лежавшие в стриме до создания группы (события B2B «теряются» для модерации).
+            redis_client.xgroup_create(name=stream, groupname=group, id="0", mkstream=True)
         except ResponseError as exc:
             if "BUSYGROUP" not in str(exc):
                 raise

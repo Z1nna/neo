@@ -1,0 +1,249 @@
+# JSON Schema (YAML) для uml/neomarket-b2b-b2c-moderation-architecture.yml
+# Документ смешанного назначения: метаданные, домены, инфраструктура, граф зависимостей.
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://neomarket.local/schemas/neomarket-architecture-document.schema.yaml
+title: NeoMarket architecture YAML (B2B / B2C / moderation stack)
+type: object
+required:
+  - meta
+  - domains
+  - databases
+  - redis
+  - api_gateway
+  - compose_processes
+  - sync_http_integrations
+  - integration_flows
+  - security_jwt
+  - frontend_source_apps
+  - dependency_graph
+additionalProperties: true
+properties:
+  meta:
+    type: object
+    required: [project, schema_version, sources_of_truth]
+    additionalProperties: true
+    properties:
+      project: { type: string }
+      schema_version: { type: string }
+      description: { type: string }
+      sources_of_truth:
+        type: array
+        items: { type: string }
+      public_api_base: { type: string }
+      internal_service_network: { type: string }
+      redis_event_stream: { type: string }
+
+  domains:
+    type: object
+    minProperties: 1
+    additionalProperties:
+      type: object
+      required: [name, actors, responsibilities]
+      additionalProperties: true
+      properties:
+        name: { type: string }
+        actors:
+          type: array
+          items: { type: string }
+        responsibilities:
+          type: array
+          items: { type: string }
+        openapi:
+          type: array
+          items:
+            type: object
+            required: [path]
+            additionalProperties: true
+            properties:
+              path: { type: string }
+        django_app: { type: string }
+        django_apps:
+          type: array
+          items: { type: string }
+        product_statuses:
+          type: array
+          items: { type: string }
+        moderation_card_queue_status:
+          type: array
+          items: { type: string }
+        moderation_card_event_type:
+          type: array
+          items: { type: string }
+
+  databases:
+    type: object
+    required: [list]
+    additionalProperties: true
+    properties:
+      list:
+        type: array
+        minItems: 1
+        items:
+          type: object
+          required: [name, service]
+          additionalProperties: true
+          properties:
+            name: { type: string }
+            service: { type: string }
+      init_script: { type: string }
+      container: { type: string }
+      host_port: { type: integer }
+
+  redis:
+    type: object
+    required: [container, host_port, streams]
+    additionalProperties: true
+    properties:
+      container: { type: string }
+      host_port: { type: integer }
+      streams:
+        type: object
+        minProperties: 1
+        additionalProperties:
+          type: object
+          additionalProperties: true
+
+  api_gateway:
+    type: object
+    required: [technology, container, host_port, config_file]
+    additionalProperties: true
+    properties:
+      technology: { type: string }
+      container: { type: string }
+      host_port: { type: integer }
+      internal_port: { type: integer }
+      config_file: { type: string }
+      dockerfile: { type: string }
+      health_path: { type: string }
+      upstreams:
+        type: object
+        additionalProperties: { type: string }
+      location_prefix_to_service:
+        type: object
+        additionalProperties: { type: string }
+
+  compose_processes:
+    type: object
+    required: [datastores, http_services, workers, frontends, observability, volumes]
+    additionalProperties: true
+    properties:
+      datastores:
+        type: object
+        additionalProperties: true
+      http_services:
+        type: array
+        items:
+          type: object
+          required: [name, container]
+          additionalProperties: true
+      workers:
+        type: array
+        items:
+          type: object
+          required: [name, container]
+          additionalProperties: true
+      frontends:
+        type: array
+        items:
+          type: object
+          required: [name, container]
+          additionalProperties: true
+      observability:
+        type: array
+        items:
+          type: object
+          required: [name, container]
+          additionalProperties: true
+      volumes:
+        type: array
+        items: { type: string }
+
+  sync_http_integrations:
+    type: array
+    items:
+      type: object
+      required: [from, to, purpose]
+      additionalProperties: true
+      properties:
+        from: { type: string }
+        to: { type: string }
+        purpose: { type: string }
+        env: { type: string }
+        path: { type: string }
+        protocol: { type: string }
+
+  integration_flows:
+    type: object
+    additionalProperties:
+      type: object
+      required: [description, steps]
+      additionalProperties: true
+      properties:
+        description: { type: string }
+        steps:
+          type: array
+          minItems: 1
+          description: Шаги могут быть структурированными объектами или краткими строками (см. b2c_order_pipeline).
+          items:
+            oneOf:
+              - type: string
+                minLength: 1
+              - type: object
+                additionalProperties: true
+        supplemental:
+          type: object
+          additionalProperties: true
+
+  security_jwt:
+    type: object
+    additionalProperties: true
+    properties:
+      issuer: { type: string }
+      audience: { type: string }
+      algorithm: { type: string }
+      signing_secret_env: { type: string }
+      services_using_jwt:
+        type: array
+        items: { type: string }
+
+  frontend_source_apps:
+    type: array
+    minItems: 1
+    items:
+      type: object
+      required: [path]
+      additionalProperties: true
+      properties:
+        path: { type: string }
+        domain: { type: string }
+        note: { type: string }
+
+  dependency_graph:
+    type: object
+    required: [nodes, edges]
+    additionalProperties: true
+    properties:
+      nodes:
+        type: array
+        minItems: 1
+        items:
+          type: object
+          required: [id, type]
+          additionalProperties: true
+          properties:
+            id: { type: string }
+            type: { type: string }
+      edges:
+        type: array
+        items:
+          type: object
+          required: [from, to]
+          additionalProperties: true
+          properties:
+            from: { type: string }
+            to: { type: string }
+            protocol: { type: string }
+            label: { type: string }
+
+  mermaid_flowchart:
+    type: string

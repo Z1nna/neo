@@ -18,3 +18,16 @@ class PromoApiTests(TestCase):
         applied = self.client.post('/api/v1/promo/apply', {'code': 'NEW10', 'amount': 1000}, format='json')
         self.assertEqual(applied.status_code, 200)
         self.assertTrue(applied.data['valid'])
+
+    def test_preview_valid_without_usage_increment(self):
+        preview = self.client.post('/api/v1/promo/preview/', {'code': 'WELCOME10', 'amount': 1000}, format='json')
+        self.assertEqual(preview.status_code, 200)
+        self.assertTrue(preview.data['valid'])
+        self.assertEqual(preview.data['discount'], 100)
+
+        preview2 = self.client.post('/api/v1/promo/preview/', {'code': 'WELCOME10', 'amount': 1000}, format='json')
+        self.assertTrue(preview2.data['valid'])
+
+        from promo_api.models import PromoCode
+        promo = PromoCode.objects.get(code='WELCOME10')
+        self.assertEqual(promo.used_count, 0)

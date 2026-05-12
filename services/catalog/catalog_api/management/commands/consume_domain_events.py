@@ -50,16 +50,13 @@ class Command(BaseCommand):
         """Apply domain event to catalog read model."""
         
         if source == 'moderation' and event_type in {'PRODUCT_APPROVED', 'PRODUCT_DECLINED'}:
-            product_id = payload.get('product_id')
-            if not product_id:
-                return
-            product = Product.objects.filter(id=product_id).first()
-            if product:
-                product.status = Product.Status.MODERATED if event_type == 'PRODUCT_APPROVED' else Product.Status.BLOCKED
-                product.save(update_fields=['status', 'updated_at'])
-                self.stdout.write(f"Updated product {product_id} status → {product.status}")
+            self.stdout.write(
+                f"Ignored direct moderation event {event_type} for product {payload.get('product_id')} "
+                "because catalog now waits for the authoritative B2B snapshot"
+            )
+            return
 
-        elif source == 'b2b' and event_type in {'PRODUCT_CREATED', 'PRODUCT_UPDATED'}:
+        if source == 'b2b' and event_type in {'PRODUCT_CREATED', 'PRODUCT_UPDATED'}:
             snapshot = payload.get('snapshot_after') or {}
             product = sync_product_snapshot(snapshot)
             if product is None and snapshot.get('deleted'):

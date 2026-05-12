@@ -154,7 +154,14 @@ def _get_or_create_profile(seller_id):
 
 
 def _serialize_product_snapshot(product):
-    return ProductSerializer(product).data
+    fresh_product = (
+        Product.objects
+        .select_related('category')
+        .prefetch_related('skus')
+        .filter(id=product.id)
+        .first()
+    )
+    return ProductSerializer(fresh_product or product).data
 
 
 def _clear_blocking_state(product):
@@ -194,6 +201,82 @@ def _set_product_on_moderation(product, snapshot_before=None, lifecycle_event='E
     _clear_blocking_state(product)
     product.save(update_fields=['status', 'blocking_reason', 'field_reports', 'updated_at'])
     _send_product_event(product, 'PRODUCT_UPDATED', lifecycle_event, snapshot_before=snapshot_before)
+
+
+def _normalize_field_reports(field_reports):
+    normalized = []
+    for item in field_reports or []:
+        if isinstance(item, dict):
+            field_name = str(item.get('field') or item.get('name') or '').strip()
+            message = str(item.get('message') or item.get('comment') or item.get('title') or '').strip()
+            if field_name or message:
+                normalized.append(
+                    {
+                        'field': field_name,
+                        'message': message or 'Требуется исправление после модерации',
+                    }
+                )
+            continue
+
+        text = str(item or '').strip()
+        if text:
+            normalized.append(
+                {
+                    'field': text,
+                    'message': 'Требуется исправление после модерации',
+                }
+            )
+    return normalized
+
+
+def apply_moderation_decision(validated_data):
+    event_key = validated_data['idempotency_key']
+    existing = IntegrationInbox.objects.filter(message_id=event_key).first()
+    if existing:
+        return Product.objects.filter(id=validated_data['product_id']).select_related('category').prefetch_related('skus').first()
+
+    product = Product.objects.select_related('category').prefetch_related('skus').filter(id=validated_data['product_id']).first()
+    if not product:
+        return None
+
+    snapshot_before = _serialize_product_snapshot(product)
+    decision_status = validated_data['status']
+    field_reports = _normalize_field_reports(validated_data.get('field_reports', []))
+
+    if decision_status == Product.Status.MODERATED:
+        product.status = Product.Status.MODERATED
+        _clear_blocking_state(product)
+    else:
+        product.status = Product.Status.HARD_BLOCKED if validated_data.get('hard_block') else Product.Status.BLOCKED
+        product.blocking_reason = validated_data.get('blocking_reason') or {'title': 'Moderation blocked the product'}
+        product.field_reports = field_reports
+
+    product.save(update_fields=['status', 'blocking_reason', 'field_reports', 'updated_at'])
+    IntegrationInbox.objects.create(
+        message_id=event_key,
+        source='moderation',
+        event_type=f'MODERATION_{decision_status}',
+        payload={
+            **validated_data,
+            'product_id': str(validated_data['product_id']),
+            'field_reports': field_reports,
+        },
+    )
+    _send_product_event(product, 'PRODUCT_UPDATED', 'UPDATED', snapshot_before=snapshot_before)
+
+    if decision_status != Product.Status.MODERATED:
+        _outbox_event(
+            product.id,
+            'PRODUCT_BLOCKED',
+            {
+                'product_id': str(product.id),
+                'event_type': 'PRODUCT_BLOCKED',
+                'idempotency_key': str(uuid4()),
+                'sku_ids': [str(sku_id) for sku_id in product.skus.filter(deleted=False).values_list('id', flat=True)],
+                'hard_block': product.status == Product.Status.HARD_BLOCKED,
+            },
+        )
+    return product
 
 
 def _inventory_operation_response(items, message):
@@ -487,9 +570,12 @@ class ProductDetailView(APIView):
             return _error('FORBIDDEN', 'HARD_BLOCKED product cannot be deleted', status.HTTP_403_FORBIDDEN)
         if product.deleted:
             return _error('BAD_REQUEST', 'Product is already deleted', status.HTTP_400_BAD_REQUEST)
+        if product.skus.filter(deleted=False, reserved_quantity__gt=0).exists():
+            return _error('CONFLICT', 'Product has SKU with active reserves', status.HTTP_409_CONFLICT)
 
         snapshot_before = _serialize_product_snapshot(product)
         sku_ids = [str(sku_id) for sku_id in product.skus.filter(deleted=False).values_list('id', flat=True)]
+        product.skus.filter(deleted=False).update(deleted=True, active_quantity=0, updated_at=datetime.now(timezone.utc))
         product.deleted = True
         product.save(update_fields=['deleted', 'updated_at'])
 
@@ -896,43 +982,7 @@ class ModerationEventsView(APIView):
         if not serializer.is_valid():
             return _error('BAD_REQUEST', serializer.errors, status.HTTP_400_BAD_REQUEST)
 
-        event_key = serializer.validated_data['idempotency_key']
-        existing = IntegrationInbox.objects.filter(message_id=event_key).first()
-        if existing:
-            product = Product.objects.filter(id=serializer.validated_data['product_id']).select_related('category').prefetch_related('skus').first()
-            return Response(ProductSerializer(product).data if product else {'message': 'Event already processed'})
-
-        product = Product.objects.select_related('category').prefetch_related('skus').filter(id=serializer.validated_data['product_id']).first()
+        product = apply_moderation_decision(serializer.validated_data)
         if not product:
             return _error('NOT_FOUND', 'Product not found', status.HTTP_404_NOT_FOUND)
-
-        if serializer.validated_data['status'] == Product.Status.MODERATED:
-            product.status = Product.Status.MODERATED
-            _clear_blocking_state(product)
-        else:
-            product.status = Product.Status.HARD_BLOCKED if serializer.validated_data.get('hard_block') else Product.Status.BLOCKED
-            product.blocking_reason = serializer.validated_data.get('blocking_reason') or {'title': 'Moderation blocked the product'}
-            product.field_reports = serializer.validated_data.get('field_reports', [])
-            _outbox_event(
-                product.id,
-                'PRODUCT_BLOCKED',
-                {
-                    'product_id': str(product.id),
-                    'event_type': 'PRODUCT_BLOCKED',
-                    'idempotency_key': str(uuid4()),
-                    'sku_ids': [str(sku_id) for sku_id in product.skus.filter(deleted=False).values_list('id', flat=True)],
-                    'hard_block': product.status == Product.Status.HARD_BLOCKED,
-                },
-            )
-
-        product.save(update_fields=['status', 'blocking_reason', 'field_reports', 'updated_at'])
-        IntegrationInbox.objects.create(
-            message_id=event_key,
-            source='moderation',
-            event_type=str(serializer.validated_data['status']),
-            payload={
-                **serializer.validated_data,
-                'product_id': str(serializer.validated_data['product_id']),
-            },
-        )
         return Response(ProductSerializer(product).data)

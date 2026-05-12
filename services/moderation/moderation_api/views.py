@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from django.db import transaction
 from drf_spectacular.types import OpenApiTypes
@@ -33,6 +34,28 @@ def _authorize_moderator(request):
     return context, None
 
 
+def _build_field_reports(fields, message):
+    reports = []
+    for field in fields or []:
+        field_name = str(field or '').strip()
+        if not field_name:
+            continue
+        reports.append(
+            {
+                'field': field_name,
+                'message': message or 'Требуется исправление после модерации',
+            }
+        )
+    return reports
+
+
+def _open_cards_queryset(product_id):
+    return ModerationCard.objects.select_for_update().filter(
+        product_id=product_id,
+        queue_status__in=[ModerationCard.QueueStatus.PENDING, ModerationCard.QueueStatus.IN_REVIEW],
+    ).order_by('created_at', 'id')
+
+
 @extend_schema_view(
     post=extend_schema(operation_id='moderation_get_next_card', responses=OpenApiTypes.OBJECT),
 )
@@ -46,6 +69,20 @@ class ModerationNextCardView(APIView):
             return error
 
         moderator = auth_context.actor
+
+        # Та же сессия модератора после обновления страницы: вернуть уже взятый IN_REVIEW,
+        # иначе get-next смотрит только на PENDING и очередь выглядит «пустой».
+        existing = (
+            ModerationCard.objects.select_for_update(skip_locked=True)
+            .filter(
+                queue_status=ModerationCard.QueueStatus.IN_REVIEW,
+                assigned_to=moderator,
+            )
+            .order_by('updated_at')
+            .first()
+        )
+        if existing:
+            return Response(ModerationCardSerializer(existing).data)
 
         card = (
             ModerationCard.objects.select_for_update(skip_locked=True)
@@ -106,32 +143,35 @@ class ProductApproveView(APIView):
 
         moderator = auth_context.actor
 
-        card = (
-            ModerationCard.objects.select_for_update()
-            .filter(product_id=id, queue_status__in=[ModerationCard.QueueStatus.PENDING, ModerationCard.QueueStatus.IN_REVIEW])
-            .order_by('created_at')
-            .first()
-        )
-        if not card:
+        open_cards = _open_cards_queryset(id)
+        if not open_cards.exists():
             return _error('Product is not found in moderation queue', 'NOT_FOUND', status.HTTP_404_NOT_FOUND)
 
-        card.queue_status = ModerationCard.QueueStatus.APPROVED
-        card.decided_by = moderator
-        card.decided_at = datetime.now(timezone.utc)
-        card.save(update_fields=['queue_status', 'decided_by', 'decided_at', 'updated_at'])
+        decided_at = datetime.now(timezone.utc)
+        open_cards.update(
+            queue_status=ModerationCard.QueueStatus.APPROVED,
+            decided_by=moderator,
+            decided_at=decided_at,
+            updated_at=decided_at,
+        )
 
+        idempotency_key = str(uuid4())
         ModerationEvent.objects.create(
             event_type=ModerationEvent.EventType.PRODUCT_APPROVED,
-            product_id=card.product_id,
+            product_id=id,
             payload={
-                'product_id': str(card.product_id),
-                'moderated_at': card.decided_at.isoformat(),
+                'idempotency_key': idempotency_key,
+                'product_id': str(id),
+                'moderated_at': decided_at.isoformat(),
                 'moderator': moderator,
                 'result': 'MODERATED',
+                'status': 'MODERATED',
+                'blocking_reason': None,
+                'field_reports': [],
             },
         )
 
-        return Response({'product_id': card.product_id, 'status': 'MODERATED'})
+        return Response({'product_id': id, 'status': 'MODERATED'})
 
 
 @extend_schema_view(
@@ -160,59 +200,60 @@ class ProductDeclineView(APIView):
         if not reason:
             return _error('Blocking reason does not exist', 'REASON_NOT_FOUND', status.HTTP_400_BAD_REQUEST)
 
-        card = (
-            ModerationCard.objects.select_for_update()
-            .filter(product_id=id, queue_status__in=[ModerationCard.QueueStatus.PENDING, ModerationCard.QueueStatus.IN_REVIEW])
-            .order_by('created_at')
-            .first()
-        )
-        if not card:
+        open_cards = _open_cards_queryset(id)
+        if not open_cards.exists():
             return _error('Product is not found in moderation queue', 'NOT_FOUND', status.HTTP_404_NOT_FOUND)
 
-        card.queue_status = ModerationCard.QueueStatus.DECLINED
-        card.decline_reason = reason
-        card.decline_comment = serializer.validated_data.get('comment', '')
-        card.decline_fields = serializer.validated_data.get('fields', [])
-        card.decided_by = moderator
-        card.decided_at = datetime.now(timezone.utc)
-        card.save(
-            update_fields=[
-                'queue_status',
-                'decline_reason',
-                'decline_comment',
-                'decline_fields',
-                'decided_by',
-                'decided_at',
-                'updated_at',
-            ]
+        decline_comment = serializer.validated_data.get('comment', '')
+        decline_fields = serializer.validated_data.get('fields', [])
+        decided_at = datetime.now(timezone.utc)
+        open_cards.update(
+            queue_status=ModerationCard.QueueStatus.DECLINED,
+            decline_reason=reason,
+            decline_comment=decline_comment,
+            decline_fields=decline_fields,
+            decided_by=moderator,
+            decided_at=decided_at,
+            updated_at=decided_at,
         )
 
+        blocking_reason = {
+            'code': reason.code,
+            'title': reason.title,
+            'comment': decline_comment,
+        }
+        field_reports = _build_field_reports(decline_fields, decline_comment or reason.title)
+        idempotency_key = str(uuid4())
         ModerationEvent.objects.create(
             event_type=ModerationEvent.EventType.PRODUCT_DECLINED,
-            product_id=card.product_id,
+            product_id=id,
             payload={
-                'product_id': str(card.product_id),
-                'moderated_at': card.decided_at.isoformat(),
+                'idempotency_key': idempotency_key,
+                'product_id': str(id),
+                'moderated_at': decided_at.isoformat(),
                 'moderator': moderator,
                 'result': 'BLOCKED',
+                'status': 'BLOCKED',
+                'blocking_reason': blocking_reason,
+                'field_reports': field_reports,
                 'reason': {
                     'code': reason.code,
                     'title': reason.title,
-                    'comment': card.decline_comment,
-                    'fields': card.decline_fields,
+                    'comment': decline_comment,
+                    'fields': decline_fields,
                 },
             },
         )
 
         return Response(
             {
-                'product_id': card.product_id,
+                'product_id': id,
                 'status': 'BLOCKED',
                 'reason': {
                     'code': reason.code,
                     'title': reason.title,
-                    'comment': card.decline_comment,
-                    'fields': card.decline_fields,
+                    'comment': decline_comment,
+                    'fields': decline_fields,
                 },
             }
         )

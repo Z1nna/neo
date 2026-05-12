@@ -10,7 +10,11 @@ import {
 } from '../../../shared/auth.js'
 
 const CATALOG_BASE = '/api/v1/catalog'
-const CART_BASE = '/api/v1/cart'
+const CART_ITEMS_URL = '/api/v1/cart/items/'
+const FAVORITES_BASE = '/api/v1/favorites'
+const BANNERS_URL = '/api/v1/home/banners/'
+const MAIN_COLLECTIONS_URL = '/api/v1/main/collections/'
+const COLLECTION_PRODUCTS_BASE = '/api/v1/collections'
 
 const EMPTY_AUTH_FORM = {
   email: '',
@@ -33,15 +37,30 @@ async function api(url, options = {}) {
   return payload
 }
 
+function productPrimaryImage(product) {
+  return product.image || product.images?.[0]?.url || 'https://placehold.co/600x400?text=NeoMarket'
+}
+
+function productPrimaryPrice(product) {
+  return product.price || product.skus?.[0]?.price || 0
+}
+
+function productIsInStock(product) {
+  const skus = Array.isArray(product.skus) ? product.skus : []
+  return skus.some((sku) => Number(sku.active_quantity || 0) > 0) || skus.length > 0
+}
+
 function ProductCard({ product, isFavorite, onAddToCart, onToggleFavorite }) {
+  const canBuy = productIsInStock(product)
+
   return (
     <div className="product-card">
-      <img src={product.image || 'https://placehold.co/600x400?text=NeoMarket'} alt={product.title} />
+      <img src={productPrimaryImage(product)} alt={product.title} />
       <h3>{product.title}</h3>
-      <p className="price">{new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB', maximumFractionDigits: 0 }).format(product.price || 0)}</p>
+      <p className="price">{new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB', maximumFractionDigits: 0 }).format(productPrimaryPrice(product))}</p>
       <div style={{ display: 'grid', gap: 8, padding: '0 1rem 1rem' }}>
-        <button onClick={() => onAddToCart(product)} disabled={!product.in_stock}>
-          {product.in_stock ? 'Добавить в корзину' : 'Нет в наличии'}
+        <button onClick={() => onAddToCart(product)} disabled={!canBuy}>
+          {canBuy ? 'Добавить в корзину' : 'Нет в наличии'}
         </button>
         <button onClick={() => onToggleFavorite(product)} style={{ background: isFavorite ? '#dc3545' : '#6c757d' }}>
           {isFavorite ? 'Убрать из избранного' : 'В избранное'}
@@ -81,6 +100,7 @@ export default function App() {
   const [banners, setBanners] = useState([])
   const [favoriteIds, setFavoriteIds] = useState([])
   const [selectedCategory, setSelectedCategory] = useState(null)
+  const [selectedCollection, setSelectedCollection] = useState(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [sortBy, setSortBy] = useState('date_desc')
   const [currentPage, setCurrentPage] = useState(1)
@@ -99,8 +119,8 @@ export default function App() {
       try {
         const [categoriesData, bannersData, collectionsData] = await Promise.all([
           api(`${CATALOG_BASE}/categories/`),
-          api(`${CART_BASE}/home/banners/`).catch(() => ({ items: [] })),
-          api(`${CART_BASE}/main/collections/`).catch(() => ({ items: [] })),
+          api(BANNERS_URL).catch(() => ({ items: [] })),
+          api(MAIN_COLLECTIONS_URL).catch(() => ({ items: [] })),
         ])
         if (cancelled) return
 
@@ -132,14 +152,18 @@ export default function App() {
           offset: String((currentPage - 1) * 20),
           sort: sortBy,
         })
-        if (selectedCategory) params.set('category_id', selectedCategory)
-        if (searchQuery) params.set('search', searchQuery)
-
-        const data = await api(`${CATALOG_BASE}/products/?${params.toString()}`)
+        let data
+        if (selectedCollection) {
+          data = await api(`${COLLECTION_PRODUCTS_BASE}/${selectedCollection}/products/`)
+        } else {
+          if (selectedCategory) params.set('category_id', selectedCategory)
+          if (searchQuery) params.set('search', searchQuery)
+          data = await api(`${CATALOG_BASE}/products/?${params.toString()}`)
+        }
         if (cancelled) return
 
         setProducts(data.items || [])
-        setTotalPages(Math.max(1, Math.ceil((data.total_count || 0) / 20)))
+        setTotalPages(selectedCollection ? 1 : Math.max(1, Math.ceil((data.total_count || 0) / 20)))
       } catch (error) {
         if (!cancelled) {
           setProducts([])
@@ -157,7 +181,7 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [currentPage, searchQuery, selectedCategory, sortBy])
+  }, [currentPage, searchQuery, selectedCategory, selectedCollection, sortBy])
 
   useEffect(() => {
     if (!hasAuth) {
@@ -172,7 +196,7 @@ export default function App() {
       try {
         const [me, favorites] = await Promise.all([
           fetchMe(),
-          api(`${CART_BASE}/favorites/`, {
+          api(`${FAVORITES_BASE}/`, {
             headers: buildApiHeaders(),
           }),
         ])
@@ -233,7 +257,7 @@ export default function App() {
         throw new Error('У товара пока нет доступного SKU')
       }
 
-      await api(`${CART_BASE}/cart/items/`, {
+      await api(CART_ITEMS_URL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -259,7 +283,7 @@ export default function App() {
 
     const isFavorite = favoriteSet.has(product.id)
     try {
-      await api(`${CART_BASE}/favorites/${product.id}/`, {
+      await api(`${FAVORITES_BASE}/${product.id}/`, {
         method: isFavorite ? 'DELETE' : 'POST',
         headers: buildApiHeaders(),
       })
@@ -307,6 +331,7 @@ export default function App() {
 
       <div className="container">
         <CategoryList categories={categories} selectedCategory={selectedCategory} onSelectCategory={(id) => {
+          setSelectedCollection(null)
           setSelectedCategory(id)
           setCurrentPage(1)
         }} />
@@ -328,7 +353,17 @@ export default function App() {
           {collections.length > 0 && (
             <div className="categories" style={{ marginBottom: 16 }}>
               {collections.map((collection) => (
-                <button key={collection.id} className="category-btn" type="button">
+                <button
+                  key={collection.id}
+                  className={`category-btn ${selectedCollection === collection.id ? 'active' : ''}`}
+                  type="button"
+                  onClick={() => {
+                    setSelectedCollection((current) => current === collection.id ? null : collection.id)
+                    setSelectedCategory(null)
+                    setSearchQuery('')
+                    setCurrentPage(1)
+                  }}
+                >
                   {collection.title}
                 </button>
               ))}
@@ -341,6 +376,7 @@ export default function App() {
                 type="text"
                 value={searchQuery}
                 onChange={(event) => {
+                  setSelectedCollection(null)
                   setSearchQuery(event.target.value)
                   setCurrentPage(1)
                 }}
@@ -351,6 +387,7 @@ export default function App() {
 
             <div className="filter-controls">
               <select value={sortBy} onChange={(event) => {
+                setSelectedCollection(null)
                 setSortBy(event.target.value)
                 setCurrentPage(1)
               }}>

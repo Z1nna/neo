@@ -107,6 +107,27 @@ class CatalogEventProjectionTests(TestCase):
         self.assertEqual(image.image_url, "https://cdn.example.com/product.jpg")
         self.assertEqual(attribute.value, "Neo")
 
+    def test_direct_moderation_events_do_not_flip_catalog_status_without_b2b_snapshot(self):
+        product = Product.objects.create(
+            id=uuid.uuid4(),
+            title="Still waiting for B2B",
+            description="demo",
+            status=Product.Status.BLOCKED,
+            category=self.category,
+        )
+
+        self.command._handle_event(
+            "moderation",
+            "PRODUCT_APPROVED",
+            {
+                "product_id": str(product.id),
+                "status": "MODERATED",
+            },
+        )
+
+        product.refresh_from_db()
+        self.assertEqual(product.status, Product.Status.BLOCKED)
+
 
 class CatalogApiTests(TestCase):
     def setUp(self):

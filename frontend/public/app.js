@@ -2,6 +2,13 @@ const AUTH_API_BASE = '/api/v1/auth';
 const AUTH_STORAGE_KEY = 'neomarket-auth-session';
 const AUTH_RETURN_URL_KEY = 'neomarket-auth-return-url';
 
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function isUuid(value) {
+  return UUID_RE.test(String(value || '').trim());
+}
+
 const state = {
   authToken: '',
   refreshToken: '',
@@ -29,6 +36,41 @@ const state = {
   selectedAddressId: localStorage.getItem('nm_selected_address_id') || '',
   shipmentIdsByUser: JSON.parse(localStorage.getItem('nm_shipment_ids_by_user') || '{}'),
 };
+
+/** Совпадает с UUID в b2b_api/migrations/0007_promo_lifestyle_products.py */
+const TOPBAR_PROMO_SLIDES = [
+  {
+    productId: 'b320c101-1010-4a10-b101-000000000001',
+    eyebrow: 'Частный авиа',
+    cta: 'Купить самолёт',
+    image:
+      'https://images.unsplash.com/photo-1436491865332-7a61a109cc05?auto=format&fit=crop&w=1200&q=80',
+  },
+  {
+    productId: 'b320c101-1010-4a10-b102-000000000002',
+    eyebrow: 'Авто',
+    cta: 'Купить машину',
+    image:
+      'https://images.unsplash.com/photo-1494976388531-d1058494cdd8?auto=format&fit=crop&w=1200&q=80',
+  },
+  {
+    productId: 'b320c101-1010-4a10-b103-000000000003',
+    eyebrow: 'Недвижимость',
+    cta: 'Купить дом',
+    image:
+      'https://images.unsplash.com/photo-1568605114967-8130f3a36994?auto=format&fit=crop&w=1200&q=80',
+  },
+  {
+    productId: 'b320c101-1010-4a10-b104-000000000004',
+    eyebrow: 'Авиа',
+    cta: 'Купить вертолёт',
+    image:
+      'https://images.unsplash.com/photo-1587474260584-136574528ed5?auto=format&fit=crop&w=1200&q=80',
+  },
+];
+
+let topbarPromoIndex = 0;
+let topbarPromoTimer = null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -171,6 +213,13 @@ function formatRub(amount) {
   }).format(Number(amount || 0));
 }
 
+function goToProductPage(productId) {
+  if (!productId) {
+    return;
+  }
+  window.location.href = `./product.html?id=${encodeURIComponent(productId)}`;
+}
+
 function setMessage(nodeId, text, isError = false) {
   const node = $(nodeId);
   if (!node) {
@@ -211,12 +260,25 @@ function setRoleVisibility() {
   }
 }
 
+const KNOWN_MAIN_TABS = new Set(['home', 'catalog', 'cart', 'checkout', 'account', 'moderation']);
+
 function activateTab(tabId) {
+  let id = String(tabId || 'home').trim();
+  if (!KNOWN_MAIN_TABS.has(id)) {
+    id = 'home';
+  }
+  if (isModeratorMode() && id !== 'moderation') {
+    id = 'moderation';
+  }
+  if (!isModeratorMode() && id === 'moderation') {
+    id = 'home';
+  }
+
   document.querySelectorAll('.tab').forEach((item) => item.classList.remove('active'));
   document.querySelectorAll('.panel').forEach((panel) => panel.classList.remove('active'));
 
-  const tab = document.querySelector(`.tab[data-tab="${tabId}"]`);
-  const panel = $(tabId);
+  const tab = document.querySelector(`.tab[data-tab="${id}"]`);
+  const panel = $(id);
   if (tab && tab.style.display !== 'none') {
     tab.classList.add('active');
   }
@@ -232,6 +294,9 @@ function wireTabs() {
         return;
       }
       activateTab(tab.dataset.tab);
+      if (tab.dataset.tab === 'account' && state.authToken && !isModeratorMode()) {
+        void loadFavorites();
+      }
     });
   });
 }
@@ -253,11 +318,54 @@ function apiHeaders(extra = {}) {
   return headers;
 }
 
+let authRefreshPromise = null;
+
+async function tryRefreshAuthSession() {
+  const session = authSession();
+  const refreshToken = session?.refreshToken;
+  if (!refreshToken) {
+    return false;
+  }
+  if (!authRefreshPromise) {
+    authRefreshPromise = (async () => {
+      try {
+        const response = await fetch(`${AUTH_API_BASE}/refresh/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refresh_token: refreshToken }),
+        });
+        const contentType = response.headers.get('content-type') || '';
+        const data = contentType.includes('application/json') ? await response.json() : null;
+        if (!response.ok) {
+          if (response.status === 401 || response.status === 400) {
+            clearSession();
+          }
+          return false;
+        }
+        const next = {
+          ...session,
+          accessToken: data.access_token,
+          refreshToken: data.refresh_token,
+          tokenType: data.token_type || 'Bearer',
+        };
+        localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(next));
+        hydrateSession();
+        return true;
+      } catch {
+        return false;
+      } finally {
+        authRefreshPromise = null;
+      }
+    })();
+  }
+  return authRefreshPromise;
+}
+
 function moderationHeaders(extra = {}) {
   return apiHeaders(extra);
 }
 
-async function api(path, options = {}) {
+async function api(path, options = {}, allowAuthRetry = true) {
   const response = await fetch(path, options);
   if (response.status === 204) {
     return null;
@@ -266,6 +374,27 @@ async function api(path, options = {}) {
   const data = contentType.includes('application/json') ? await response.json() : null;
 
   if (!response.ok) {
+    if (
+      allowAuthRetry
+      && response.status === 401
+      && authSession()?.refreshToken
+      && !String(path).includes('/auth/refresh/')
+    ) {
+      const refreshed = await tryRefreshAuthSession();
+      if (refreshed) {
+        const baseHeaders = options.headers && typeof options.headers === 'object' && !(options.headers instanceof Headers)
+          ? { ...options.headers }
+          : {};
+        return api(
+          path,
+          {
+            ...options,
+            headers: { ...baseHeaders, ...apiHeaders() },
+          },
+          false,
+        );
+      }
+    }
     const message = getApiErrorMessage(data, response.status);
     throw new Error(message);
   }
@@ -287,12 +416,42 @@ function renderAuthState() {
   const node = $('authState');
   if (!state.authToken) {
     node.textContent = 'Вы не авторизованы. Откройте отдельную страницу входа, чтобы войти или зарегистрироваться.';
+    renderHeaderAuthActions();
     renderAccountAuthActions();
     return;
   }
 
   node.textContent = `${state.fullName || state.email} (${activeUserRoleLabel()}) • ${state.userId}`;
+  renderHeaderAuthActions();
   renderAccountAuthActions();
+}
+
+function renderHeaderAuthActions() {
+  const loginBtn = $('authLoginBtn');
+  const registerBtn = $('authRegisterBtn');
+  const logoutBtn = $('authLogoutBtn');
+  const refreshBtn = $('refreshAll');
+  const hint = $('authHint');
+  if (!loginBtn || !registerBtn || !logoutBtn || !refreshBtn || !hint) {
+    return;
+  }
+
+  const isLoggedIn = Boolean(state.authToken);
+  const isModerator = isModeratorMode();
+
+  loginBtn.style.display = isLoggedIn ? 'none' : '';
+  registerBtn.style.display = isLoggedIn ? 'none' : '';
+  logoutBtn.style.display = isLoggedIn ? '' : 'none';
+  refreshBtn.style.display = '';
+
+  if (!isLoggedIn) {
+    hint.textContent = 'Вход и регистрация теперь открываются на отдельной странице. Для входа нужны только почта и пароль.';
+    return;
+  }
+
+  hint.textContent = isModerator
+    ? 'Режим модератора активен. Оставлены только действия обновления данных и выхода.'
+    : 'Вы уже вошли в аккаунт. Можно обновить данные или выйти.';
 }
 
 function renderAccountAuthActions() {
@@ -409,6 +568,10 @@ function clearAuthForm() {
   setInputValue('authRoleSelect', 'CUSTOMER');
 }
 
+async function refreshCurrentProductDetailsIfNeeded() {
+  /* Детальная карточка — на product.html */
+}
+
 async function login(source = 'main') {
   try {
     const { email, password, roleMode } = getAuthFormData(source);
@@ -436,6 +599,7 @@ async function login(source = 'main') {
     setAuthFeedback(`Вход выполнен: ${state.fullName || state.email}`);
 
     await bootData();
+    await refreshCurrentProductDetailsIfNeeded();
   } catch (error) {
     setAuthFeedback(`Ошибка авторизации: ${error.message}`, true);
   }
@@ -462,6 +626,7 @@ async function registerAccount(source = 'main') {
     syncAuthInputs({ email: state.email, password: '', roleMode });
     setAuthFeedback(`Аккаунт создан: ${state.email}`);
     await bootData();
+    await refreshCurrentProductDetailsIfNeeded();
   } catch (error) {
     setAuthFeedback(`Ошибка регистрации: ${error.message}`, true);
   }
@@ -483,6 +648,7 @@ async function logout() {
     loadOrders(),
     loadShipments(),
   ]);
+  await refreshCurrentProductDetailsIfNeeded();
 
   setAuthFeedback('Вы вышли из аккаунта');
 }
@@ -514,13 +680,35 @@ async function loadCategories() {
   });
 }
 
-async function loadProductSkus(productId) {
+function looksLikeMojibakeSkuName(name) {
+  const t = String(name || '').trim();
+  if (!t) {
+    return true;
+  }
+  if (/^[\uFFFD?]{2,}/.test(t) || /^\?{2,}/.test(t)) {
+    return true;
+  }
+  const q = (t.match(/\?/g) || []).length;
+  return t.length > 3 && q / t.length > 0.3;
+}
+
+function skuDisplayLabel(sku, product) {
+  const raw = sku?.name != null ? String(sku.name) : '';
+  if (looksLikeMojibakeSkuName(raw)) {
+    const title = product?.title ? String(product.title) : 'Товар';
+    return `${title} · вариант`;
+  }
+  return raw;
+}
+
+async function loadProductSkus(productId, product) {
   const skus = await api(`/api/v1/catalog/products/${productId}/skus/`);
   skus.forEach((sku) => {
+    const label = skuDisplayLabel(sku, product);
     state.skuMap[sku.id] = {
       product_id: productId,
       sku_id: sku.id,
-      title: sku.name,
+      title: label,
       unit_price: sku.price,
     };
   });
@@ -533,8 +721,8 @@ async function addToCart(product, skuId, quantity = 1) {
     openAuthPage('login');
     throw new Error('Открываю страницу входа, чтобы можно было добавить товар в корзину');
   }
-  if (!skuId) {
-    throw new Error('Выберите SKU');
+  if (!skuId || !isUuid(skuId)) {
+    throw new Error('Выберите SKU из списка');
   }
 
   const skuData = state.skuMap[skuId] || {};
@@ -548,10 +736,13 @@ async function addToCart(product, skuId, quantity = 1) {
     headers: apiHeaders(),
     body: JSON.stringify({ sku_id: skuId, quantity }),
   });
+  invalidatePromoState();
 }
 
 function productCardNode(product) {
   const node = $('productTemplate').content.firstElementChild.cloneNode(true);
+  node.classList.add('product-card--clickable');
+  node.dataset.productId = product.id;
   node.querySelector('.product-title').textContent = product.title;
   node.querySelector('.product-price').textContent = formatRub(product.price);
   node.querySelector('.product-meta').textContent = product.in_stock ? 'В наличии' : 'Нет в наличии';
@@ -562,7 +753,7 @@ function productCardNode(product) {
   addCartButton.disabled = true;
   addCartButton.textContent = 'Загрузка SKU...';
 
-  loadProductSkus(product.id)
+  loadProductSkus(product.id, product)
     .then((skus) => {
       skuSelect.innerHTML = '';
       if (!skus.length) {
@@ -573,7 +764,7 @@ function productCardNode(product) {
       skus.forEach((sku) => {
         const option = document.createElement('option');
         option.value = sku.id;
-        option.textContent = `${sku.name} - ${formatRub(sku.price)}`;
+        option.textContent = `${skuDisplayLabel(sku, product)} — ${formatRub(sku.price)}`;
         skuSelect.appendChild(option);
       });
       addCartButton.disabled = false;
@@ -584,22 +775,33 @@ function productCardNode(product) {
       addCartButton.textContent = 'Ошибка SKU';
     });
 
-  node.querySelector('.favorite-btn').addEventListener('click', async () => {
+  node.addEventListener('click', (e) => {
+    if (e.target.closest('button, select')) {
+      return;
+    }
+    goToProductPage(product.id);
+  });
+
+  node.querySelector('.favorite-btn').addEventListener('click', async (e) => {
+    e.stopPropagation();
     try {
       if (!state.authToken) {
-        throw new Error('Для избранного нужна авторизация');
+        openAuthPage('login');
+        return;
       }
       await api(`/api/v1/favorites/${product.id}/`, {
         method: 'POST',
         headers: apiHeaders(),
       });
       await loadFavorites();
+      setMessage('checkoutMsg', 'Товар добавлен в избранное');
     } catch (error) {
-      setMessage('accountMsg', error.message, true);
+      setMessage('checkoutMsg', error.message, true);
     }
   });
 
-  addCartButton.addEventListener('click', async () => {
+  addCartButton.addEventListener('click', async (e) => {
+    e.stopPropagation();
     try {
       await addToCart(product, skuSelect.value, 1);
       await Promise.all([loadCart(), renderCheckoutPreview()]);
@@ -609,8 +811,9 @@ function productCardNode(product) {
     }
   });
 
-  node.querySelector('.details-btn').addEventListener('click', async () => {
-    await openProductDetails(product.id);
+  node.querySelector('.details-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    goToProductPage(product.id);
   });
 
   return node;
@@ -638,45 +841,18 @@ async function loadProducts() {
   renderProducts(state.products);
 }
 
-function buildGallery(productId) {
-  const suffixes = ['a', 'b', 'c'];
-  return suffixes.map((suffix, index) => `https://picsum.photos/seed/${productId}-${suffix}/420/${280 + index}`);
-}
-
-function renderQa(payload) {
-  const list = $('qaList');
-  list.innerHTML = '';
-  const items = payload?.items || [];
-  if (!items.length) {
-    list.innerHTML = '<p class="muted">Пока вопросов нет</p>';
-    return;
-  }
-
-  items.forEach((item) => {
-    const node = document.createElement('article');
-    node.className = 'qa-item';
-    node.innerHTML = `
-      <p><strong>Вопрос:</strong> ${item.question}</p>
-      <p class="muted"><strong>Кто:</strong> ${item.user_id}</p>
-      <p class="muted"><strong>Когда:</strong> ${new Date(item.created_at).toLocaleString('ru-RU')}</p>
-      <p><strong>Ответ:</strong> ${item.answer || 'Пока нет ответа продавца'}</p>
-    `;
-    list.appendChild(node);
-  });
-}
-
-async function loadProductQa(productId) {
-  return api(`/api/v1/reviews/qa/questions/?product_id=${productId}`);
+async function openCatalogProductFromPromo(productId) {
+  goToProductPage(productId);
 }
 
 function renderQaModerationQueue(payload) {
   const root = $('qaModerationList');
   root.innerHTML = '';
+  state.selectedQaQuestionId = '';
+  $('submitQaAnswerBtn').disabled = true;
   const items = payload?.items || [];
   if (!items.length) {
     root.innerHTML = '<p class="muted">Открытых вопросов нет</p>';
-    state.selectedQaQuestionId = '';
-    $('submitQaAnswerBtn').disabled = true;
     return;
   }
 
@@ -745,191 +921,125 @@ async function submitQaAnswer() {
   }
 }
 
-async function openProductDetails(productId) {
-  state.currentProductId = productId;
-  const [details, similar, reviews, qa] = await Promise.all([
-    api(`/api/v1/catalog/products/${productId}/`),
-    api(`/api/v1/catalog/products/${productId}/similar/?limit=6&offset=0`),
-    api(`/api/v1/reviews/reviews/?product_id=${productId}`),
-    loadProductQa(productId),
-  ]);
 
-  state.currentProduct = details;
-  const detailsRoot = $('productDetails');
-  const gallery = buildGallery(productId);
-  const galleryMarkup = gallery
-    .map((url) => `<img src="${url}" alt="${details.title}" loading="lazy" class="gallery-image" />`)
-    .join('');
-
-  const skuOptions = (details.skus || [])
-    .map((sku) => `<option value="${sku.id}">${sku.name} - ${formatRub(sku.price)}</option>`)
-    .join('');
-
-  const characteristicItems = [
-    { key: 'Статус', value: details.status || 'UNKNOWN' },
-    { key: 'Категория', value: details.category?.name || 'Не задана' },
-    { key: 'SKU', value: String(details.skus?.length || 0) },
-  ];
-  const characteristicsMarkup = characteristicItems
-    .map((item) => `<div class="profile-row"><strong>${item.key}:</strong> ${item.value}</div>`)
-    .join('');
-
-  const similarMarkup = (similar.items || [])
-    .map((item) => `<button class="btn btn-ghost similar-link" data-id="${item.id}">${item.title}</button>`)
-    .join('');
-
-  detailsRoot.classList.remove('muted');
-  detailsRoot.innerHTML = `
-    <h3>${details.title}</h3>
-    <p class="muted">${details.description || 'Описание пока не заполнено'}</p>
-    <div class="gallery-grid">${galleryMarkup}</div>
-    <div class="divider"></div>
-    <h4 class="subhead">Характеристики</h4>
-    <div class="profile-info">${characteristicsMarkup}</div>
-    <div class="field">
-      <label for="detailsSkuSelect">SKU</label>
-      <select id="detailsSkuSelect">${skuOptions || '<option value="">Нет SKU</option>'}</select>
-    </div>
-    <button id="detailsAddToCartBtn" class="btn btn-primary">Добавить в корзину</button>
-    <div class="divider"></div>
-    <h4 class="subhead">Похожие товары</h4>
-    <div class="similar-grid">${similarMarkup || '<p class="muted">Похожие товары не найдены</p>'}</div>
-  `;
-
-  $('submitReviewBtn').disabled = !state.authToken;
-  $('askQuestionBtn').disabled = !state.authToken;
-  renderReviews(reviews);
-  renderQa(qa);
-
-  const detailsSkuSelect = $('detailsSkuSelect');
-  const detailsAddToCartBtn = $('detailsAddToCartBtn');
-  if (!detailsSkuSelect.value) {
-    detailsAddToCartBtn.disabled = true;
-    detailsAddToCartBtn.textContent = 'Нет SKU для покупки';
+function renderTopbarPromoSlides() {
+  const track = $('topbarPromoSlides');
+  if (!track) {
+    return;
   }
-  detailsAddToCartBtn.addEventListener('click', async () => {
-    try {
-      await addToCart(details, detailsSkuSelect.value, 1);
-      await Promise.all([loadCart(), renderCheckoutPreview()]);
-      setMessage('checkoutMsg', 'Товар добавлен в корзину');
-      activateTab('cart');
-    } catch (error) {
-      setMessage('checkoutMsg', error.message, true);
-    }
-  });
+  track.innerHTML = TOPBAR_PROMO_SLIDES.map((slide, i) => {
+    const bg = `linear-gradient(90deg, rgba(15,23,42,0.78) 0%, rgba(15,23,42,0.4) 55%, rgba(15,23,42,0.25) 100%), url('${slide.image}')`;
+    return `<button type="button" class="topbar-promo__slide${i === 0 ? ' is-active' : ''}" data-index="${i}" data-product-id="${slide.productId}" style="background-image:${bg}">
+      <span class="topbar-promo__eyebrow">${escapeHtml(slide.eyebrow)}</span>
+      <span class="topbar-promo__cta">${escapeHtml(slide.cta)}</span>
+    </button>`;
+  }).join('');
+}
 
-  detailsRoot.querySelectorAll('.similar-link').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      await openProductDetails(btn.dataset.id);
+function setTopbarPromoIndex(nextIdx) {
+  const n = TOPBAR_PROMO_SLIDES.length;
+  if (!n) {
+    return;
+  }
+  topbarPromoIndex = ((nextIdx % n) + n) % n;
+  document.querySelectorAll('.topbar-promo__slide').forEach((el, i) => {
+    el.classList.toggle('is-active', i === topbarPromoIndex);
+  });
+}
+
+function stopTopbarPromoAuto() {
+  if (topbarPromoTimer) {
+    window.clearInterval(topbarPromoTimer);
+    topbarPromoTimer = null;
+  }
+}
+
+function startTopbarPromoAuto() {
+  stopTopbarPromoAuto();
+  topbarPromoTimer = window.setInterval(() => {
+    setTopbarPromoIndex(topbarPromoIndex + 1);
+  }, 10000);
+}
+
+function initTopbarPromoCarousel() {
+  const root = $('topbarPromo');
+  const track = $('topbarPromoSlides');
+  if (!root || !track || !TOPBAR_PROMO_SLIDES.length) {
+    return;
+  }
+  renderTopbarPromoSlides();
+  topbarPromoIndex = 0;
+  setTopbarPromoIndex(0);
+
+  const prev = $('topbarPromoPrev');
+  const next = $('topbarPromoNext');
+  const bump = (delta) => {
+    setTopbarPromoIndex(topbarPromoIndex + delta);
+    startTopbarPromoAuto();
+  };
+  if (prev) {
+    prev.addEventListener('click', () => bump(-1));
+  }
+  if (next) {
+    next.addEventListener('click', () => bump(1));
+  }
+
+  track.querySelectorAll('.topbar-promo__slide').forEach((btn) => {
+    btn.addEventListener('click', (event) => {
+      if (event.currentTarget !== btn) {
+        return;
+      }
+      const id = btn.getAttribute('data-product-id');
+      if (id) {
+        void openCatalogProductFromPromo(id);
+      }
     });
   });
+
+  root.addEventListener('mouseenter', stopTopbarPromoAuto);
+  root.addEventListener('mouseleave', startTopbarPromoAuto);
+
+  startTopbarPromoAuto();
 }
 
 function clearProductDetails() {
   state.currentProductId = null;
   state.currentProduct = null;
-  $('productDetails').classList.add('muted');
-  $('productDetails').textContent = 'Выберите товар, чтобы увидеть галерею, характеристики, рейтинг и Q&A.';
-  $('reviewsSummary').textContent = '';
-  $('reviewsList').innerHTML = '';
-  $('qaList').innerHTML = '';
-  $('submitReviewBtn').disabled = true;
-  $('askQuestionBtn').disabled = true;
-  setMessage('qaMsg', '');
 }
 
-function renderReviews(payload) {
-  const summary = payload?.summary || { avg_rating: 0, total: 0 };
-  $('reviewsSummary').textContent = `Средняя оценка: ${Number(summary.avg_rating || 0).toFixed(1)} (${summary.total} отзывов)`;
-
-  const root = $('reviewsList');
-  root.innerHTML = '';
-  const items = payload?.items || [];
-  if (!items.length) {
-    root.innerHTML = '<p class="muted">Пока отзывов нет</p>';
-    return;
-  }
-
-  items.forEach((review) => {
-    const node = document.createElement('article');
-    node.className = 'review-item';
-    node.innerHTML = `
-      <p><strong>${'★'.repeat(review.rating)}${'☆'.repeat(5 - review.rating)}</strong></p>
-      <p>${review.text || 'Без текста'}</p>
-      <p class="muted">Пользователь: ${review.user_id}</p>
-    `;
-    root.appendChild(node);
-  });
-}
-
-async function submitReview() {
-  if (!state.authToken) {
-    setMessage('reviewMsg', 'Для отзыва нужна авторизация', true);
-    return;
-  }
-  if (!state.currentProductId) {
-    setMessage('reviewMsg', 'Сначала выберите товар', true);
-    return;
-  }
-
-  try {
-    const payload = {
-      product_id: state.currentProductId,
-      user_id: state.userId,
-      rating: Number($('reviewRating').value),
-      text: $('reviewText').value.trim(),
-    };
-    await api('/api/v1/reviews/reviews/', {
-      method: 'POST',
-      headers: apiHeaders(),
-      body: JSON.stringify(payload),
-    });
-    $('reviewText').value = '';
-    setMessage('reviewMsg', 'Отзыв добавлен');
-    const reviews = await api(`/api/v1/reviews/reviews/?product_id=${state.currentProductId}`);
-    renderReviews(reviews);
-  } catch (error) {
-    setMessage('reviewMsg', error.message, true);
+function invalidatePromoState() {
+  state.promo = null;
+  const el = $('promoResult');
+  if (el) {
+    el.textContent = '';
   }
 }
 
-async function askQuestion() {
-  if (!state.authToken || !state.currentProductId) {
-    setMessage('qaMsg', 'Нужна авторизация и выбранный товар', true);
-    return;
+function clearModerationDeclineForm() {
+  const reason = $('declineReason');
+  if (reason && reason.options.length) {
+    reason.selectedIndex = 0;
   }
-  const question = $('qaQuestionInput').value.trim();
-  if (!question) {
-    setMessage('qaMsg', 'Введите вопрос', true);
-    return;
-  }
-
-  try {
-    await api('/api/v1/reviews/qa/questions/', {
-      method: 'POST',
-      headers: apiHeaders(),
-      body: JSON.stringify({
-        product_id: state.currentProductId,
-        user_id: state.userId,
-        question,
-      }),
-    });
-
-    $('qaQuestionInput').value = '';
-    const payload = await loadProductQa(state.currentProductId);
-    renderQa(payload);
-    setMessage('qaMsg', 'Вопрос добавлен');
-  } catch (error) {
-    setMessage('qaMsg', error.message, true);
+  const comment = $('declineComment');
+  if (comment) {
+    comment.value = '';
   }
 }
 
 async function loadBanners() {
   const data = await api('/api/v1/home/banners/');
   const root = $('heroBanners');
+  const wrap = $('heroBannersWrap');
   root.innerHTML = '';
 
-  (data.items || []).forEach((banner) => {
+  const items = data.items || [];
+  if (!items.length) {
+    wrap.style.display = 'none';
+    return;
+  }
+
+  wrap.style.display = '';
+  items.forEach((banner) => {
     const node = document.createElement('article');
     node.className = 'banner-item';
     node.style.backgroundImage = `url('${banner.image}')`;
@@ -1045,6 +1155,7 @@ async function loadCart() {
         headers: apiHeaders(),
         body: JSON.stringify({ quantity: item.quantity - 1 }),
       });
+      invalidatePromoState();
       await Promise.all([loadCart(), renderCheckoutPreview()]);
     });
 
@@ -1054,6 +1165,7 @@ async function loadCart() {
         headers: apiHeaders(),
         body: JSON.stringify({ quantity: item.quantity + 1 }),
       });
+      invalidatePromoState();
       await Promise.all([loadCart(), renderCheckoutPreview()]);
     });
 
@@ -1062,6 +1174,7 @@ async function loadCart() {
         method: 'DELETE',
         headers: apiHeaders(),
       });
+      invalidatePromoState();
       await Promise.all([loadCart(), renderCheckoutPreview()]);
     });
 
@@ -1072,55 +1185,91 @@ async function loadCart() {
   await renderCheckoutPreview();
 }
 
+function renderFavoritesInto(target, items) {
+  if (!target) {
+    return;
+  }
+  target.innerHTML = '';
+
+  if (!items.length) {
+    target.innerHTML = '<p class="muted">Избранное пока пусто</p>';
+    return;
+  }
+
+  items.forEach((favorite) => {
+    const productId = favorite.product?.id || favorite.product_id;
+    const productTitle = favorite.product?.title || productId;
+    const node = document.createElement('article');
+    node.className = 'favorite-item';
+    node.innerHTML = `
+      <strong>${escapeHtml(productTitle)}</strong>
+      <div class="muted">UID: ${escapeHtml(productId)}</div>
+      <div class="muted">Добавлено: ${escapeHtml(new Date(favorite.added_at).toLocaleString('ru-RU'))}</div>
+      <div class="product-actions">
+        <button type="button" class="btn btn-ghost open-product">К товару</button>
+        <button type="button" class="btn btn-ghost remove-fav">Удалить</button>
+      </div>
+    `;
+
+    node.querySelector('.open-product').addEventListener('click', () => {
+      goToProductPage(productId);
+    });
+
+    node.querySelector('.remove-fav').addEventListener('click', async () => {
+      await api(`/api/v1/favorites/${productId}/`, {
+        method: 'DELETE',
+        headers: apiHeaders(),
+      });
+      await loadFavorites();
+    });
+
+    target.appendChild(node);
+  });
+}
+
+async function fetchAllFavoriteItems() {
+  const limit = 100;
+  let offset = 0;
+  const all = [];
+  for (;;) {
+    const data = await api(`/api/v1/favorites/?limit=${limit}&offset=${offset}`, { headers: apiHeaders() });
+    const batch = data.items || [];
+    all.push(...batch);
+    if (batch.length < limit) {
+      break;
+    }
+    offset += limit;
+  }
+  return all;
+}
+
 async function loadFavorites() {
-  const list = $('favoritesList');
+  const cartList = $('favoritesList');
+  const accountList = $('accountFavoritesList');
+  const emptyHint = '<p class="muted">Избранное доступно после входа</p>';
+
   if (!state.authToken) {
-    list.innerHTML = '<p class="muted">Избранное доступно после входа</p>';
+    if (cartList) {
+      cartList.innerHTML = emptyHint;
+    }
+    if (accountList) {
+      accountList.innerHTML = emptyHint;
+    }
     return;
   }
 
   try {
-    const data = await api('/api/v1/favorites/?limit=20&offset=0', { headers: apiHeaders() });
-    const items = data.items || [];
-    list.innerHTML = '';
-
-    if (!items.length) {
-      list.innerHTML = '<p class="muted">Избранное пока пусто</p>';
-      return;
-    }
-
-    items.forEach((favorite) => {
-      const productId = favorite.product?.id || favorite.product_id;
-      const productTitle = favorite.product?.title || productId;
-      const node = document.createElement('article');
-      node.className = 'favorite-item';
-      node.innerHTML = `
-        <strong>${productTitle}</strong>
-        <div class="muted">Product ID: ${productId}</div>
-        <div class="muted">Добавлено: ${new Date(favorite.added_at).toLocaleString('ru-RU')}</div>
-        <div class="product-actions">
-          <button class="btn btn-ghost open-product">К товару</button>
-          <button class="btn btn-ghost remove-fav">Удалить</button>
-        </div>
-      `;
-
-      node.querySelector('.open-product').addEventListener('click', async () => {
-        activateTab('catalog');
-        await openProductDetails(productId);
-      });
-
-      node.querySelector('.remove-fav').addEventListener('click', async () => {
-        await api(`/api/v1/favorites/${productId}/`, {
-          method: 'DELETE',
-          headers: apiHeaders(),
-        });
-        await loadFavorites();
-      });
-
-      list.appendChild(node);
-    });
+    const items = await fetchAllFavoriteItems();
+    renderFavoritesInto(cartList, items);
+    renderFavoritesInto(accountList, items);
   } catch (error) {
-    list.innerHTML = `<p class="muted" style="color:#be123c">${error.message}</p>`;
+    const errHtml = `<p class="muted" style="color:#be123c">${escapeHtml(error.message)}</p>`;
+    if (cartList) {
+      cartList.innerHTML = errHtml;
+    }
+    if (accountList) {
+      accountList.innerHTML = errHtml;
+    }
   }
 }
 
@@ -1302,7 +1451,7 @@ async function applyPromo() {
   }
 
   try {
-    const result = await api('/api/v1/promo/promo/apply/', {
+    const result = await api('/api/v1/promo/promo/preview/', {
       method: 'POST',
       headers: apiHeaders(),
       body: JSON.stringify({ code, amount: totals.amount }),
@@ -1409,6 +1558,7 @@ async function runCheckoutFlow() {
         idempotency_key: crypto.randomUUID(),
         items: orderItems,
         delivery_address: parseDeliveryAddress(),
+        promo_code: state.promo?.promo_code || '',
       }),
     });
     const finalAmount = Number(order.total_amount || cart.summary?.total_amount || 0);
@@ -1628,7 +1778,7 @@ async function loadBlockingReasons() {
   state.blockingReasons = reasons || [];
 
   const select = $('declineReason');
-  select.innerHTML = '';
+  select.innerHTML = '<option value="">-</option>';
   state.blockingReasons.forEach((reason) => {
     const option = document.createElement('option');
     option.value = reason.code;
@@ -1637,16 +1787,199 @@ async function loadBlockingReasons() {
   });
 }
 
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function moderationBadgeClass(status) {
+  const normalized = String(status || '').toUpperCase();
+  if (normalized === 'MODERATED' || normalized === 'APPROVED') {
+    return 'moderation-badge-success';
+  }
+  if (['BLOCKED', 'HARD_BLOCKED', 'DECLINED'].includes(normalized)) {
+    return 'moderation-badge-danger';
+  }
+  return 'moderation-badge-warning';
+}
+
+function renderModerationImages(images, emptyText = 'Изображения не добавлены') {
+  const items = asArray(images).filter((image) => image?.url);
+  if (!items.length) {
+    return `<p class="muted">${escapeHtml(emptyText)}</p>`;
+  }
+  return `
+    <div class="gallery-grid moderation-gallery">
+      ${items.map((image) => `<img src="${escapeHtml(image.url)}" alt="Изображение товара" loading="lazy" class="gallery-image" />`).join('')}
+    </div>
+  `;
+}
+
+function renderModerationCharacteristics(items, emptyText = 'Характеристики не указаны') {
+  const rows = asArray(items).filter((item) => item?.name || item?.value);
+  if (!rows.length) {
+    return `<p class="muted">${escapeHtml(emptyText)}</p>`;
+  }
+  return `
+    <div class="profile-info">
+      ${rows.map((item) => `
+        <div class="profile-row">
+          <strong>${escapeHtml(item.name || 'Параметр')}:</strong> ${escapeHtml(item.value || '-')}
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function renderModerationFieldReports(items) {
+  const reports = asArray(items).filter((item) => item?.field || item?.message);
+  if (!reports.length) {
+    return '';
+  }
+  return `
+    <div class="divider"></div>
+    <div class="content-section">
+      <div class="content-label">Замечания модерации</div>
+      <div class="profile-info">
+        ${reports.map((report) => `
+          <div class="profile-row">
+            <strong>${escapeHtml(report.field || 'Поле')}:</strong> ${escapeHtml(report.message || 'Нужно исправление')}
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function renderModerationSkus(items, productTitle = '') {
+  const skus = asArray(items).filter(Boolean);
+  if (!skus.length) {
+    return '<p class="muted">SKU пока нет. Такая карточка не должна задерживаться в модерации.</p>';
+  }
+
+  const productStub = { title: productTitle || '' };
+
+  return `
+    <div class="moderation-sku-grid">
+      ${skus.map((sku) => `
+        <article class="order-item moderation-sku-card">
+          <div class="panel-head">
+            <h3>${escapeHtml(skuDisplayLabel(sku, productStub) || 'SKU без названия')}</h3>
+            <span class="badge ${sku.deleted ? 'moderation-badge-danger' : 'moderation-badge-success'}">${sku.deleted ? 'DELETED' : 'ACTIVE'}</span>
+          </div>
+          <div class="profile-info">
+            <div class="profile-row"><strong>SKU ID:</strong> ${escapeHtml(sku.id || '-')}</div>
+            <div class="profile-row"><strong>Цена:</strong> ${formatRub(sku.price || 0)}</div>
+            <div class="profile-row"><strong>Себестоимость:</strong> ${formatRub(sku.cost_price || 0)}</div>
+            <div class="profile-row"><strong>Доступный остаток:</strong> ${escapeHtml(sku.active_quantity ?? 0)}</div>
+            <div class="profile-row"><strong>В резерве:</strong> ${escapeHtml(sku.reserved_quantity ?? 0)}</div>
+          </div>
+          <div class="divider"></div>
+          <div class="content-section">
+            <div class="content-label">Фото SKU</div>
+            ${renderModerationImages(sku.images, 'У SKU нет отдельных изображений')}
+          </div>
+          <div class="divider"></div>
+          <div class="content-section">
+            <div class="content-label">Характеристики SKU</div>
+            ${renderModerationCharacteristics(sku.characteristics, 'Характеристики SKU не указаны')}
+          </div>
+        </article>
+      `).join('')}
+    </div>
+  `;
+}
+
 function renderModerationCard(card) {
   const node = $('moderationCard');
   if (!card) {
+    clearModerationDeclineForm();
     node.textContent = 'Очередь пуста';
+    node.classList.add('muted');
     $('approveBtn').disabled = true;
     $('declineBtn').disabled = true;
     return;
   }
 
-  node.innerHTML = `<pre>${JSON.stringify(card, null, 2)}</pre>`;
+  clearModerationDeclineForm();
+  node.classList.remove('muted');
+  const snapshot = card.snapshot_after || {};
+  const categoryName = snapshot.category?.name || 'Категория не указана';
+  const status = snapshot.status || 'UNKNOWN';
+  const blockingReason = snapshot.blocking_reason?.title || snapshot.blocking_reason?.code || '';
+  const updatedAt = snapshot.updated_at || card.updated_at;
+  const createdAt = snapshot.created_at || card.created_at;
+
+  node.innerHTML = `
+    <div class="panel-head">
+      <div>
+        <h3>${escapeHtml(snapshot.title || 'Карточка товара')}</h3>
+        <p class="muted">Product ID: ${escapeHtml(card.product_id)}</p>
+      </div>
+      <span class="badge ${moderationBadgeClass(status)}">${escapeHtml(status)}</span>
+    </div>
+
+    <div class="profile-info">
+      <div class="profile-row"><strong>Категория:</strong> ${escapeHtml(categoryName)}</div>
+      <div class="profile-row"><strong>Событие в очереди:</strong> ${escapeHtml(card.event_type)}</div>
+      <div class="profile-row"><strong>Статус очереди:</strong> ${escapeHtml(card.queue_status || 'PENDING')}</div>
+      <div class="profile-row"><strong>SKU:</strong> ${escapeHtml(snapshot.skus_count ?? asArray(snapshot.skus).length)}</div>
+      <div class="profile-row"><strong>Остаток:</strong> ${escapeHtml(snapshot.total_active_quantity ?? 0)}</div>
+      <div class="profile-row"><strong>Обновлено:</strong> ${escapeHtml(new Date(updatedAt).toLocaleString('ru-RU'))}</div>
+    </div>
+
+    <div class="divider"></div>
+    <div class="content-section">
+      <div class="content-label">Описание</div>
+      <div class="content-text">${escapeHtml(snapshot.description || 'Описание не заполнено')}</div>
+    </div>
+
+    <div class="divider"></div>
+    <div class="content-section">
+      <div class="content-label">Фото товара</div>
+      ${renderModerationImages(snapshot.images)}
+    </div>
+
+    <div class="divider"></div>
+    <div class="content-section">
+      <div class="content-label">Характеристики товара</div>
+      ${renderModerationCharacteristics(snapshot.characteristics)}
+    </div>
+
+    ${blockingReason ? `
+      <div class="divider"></div>
+      <div class="content-section">
+        <div class="content-label">Текущая причина блокировки</div>
+        <div class="content-text">${escapeHtml(blockingReason)}</div>
+      </div>
+    ` : ''}
+
+    ${renderModerationFieldReports(snapshot.field_reports)}
+
+    <div class="divider"></div>
+    <div class="content-section">
+      <div class="content-label">SKU продавца</div>
+      ${renderModerationSkus(snapshot.skus, snapshot.title)}
+    </div>
+
+    <div class="divider"></div>
+    <div class="content-section">
+      <div class="content-label">Таймлайн карточки</div>
+      <div class="profile-info">
+        <div class="profile-row"><strong>Создано:</strong> ${escapeHtml(new Date(createdAt).toLocaleString('ru-RU'))}</div>
+        <div class="profile-row"><strong>В очереди с:</strong> ${escapeHtml(new Date(card.created_at).toLocaleString('ru-RU'))}</div>
+        <div class="profile-row"><strong>Назначено:</strong> ${escapeHtml(card.assigned_to || 'Еще не назначено')}</div>
+      </div>
+    </div>
+  `;
   $('approveBtn').disabled = false;
   $('declineBtn').disabled = false;
 }
@@ -1660,7 +1993,12 @@ async function getNextCard() {
     });
     state.currentModerationCard = card;
     renderModerationCard(card);
-    setMessage('moderationMsg', card ? 'Карточка получена' : 'Очередь пуста');
+    setMessage(
+      'moderationMsg',
+      card
+        ? 'Карточка получена. Теперь можно одобрить или отклонить товар.'
+        : 'Очередь пуста. Товар попадет сюда после создания карточки и первого SKU у продавца.',
+    );
   } catch (error) {
     state.currentModerationCard = null;
     renderModerationCard(null);
@@ -1670,6 +2008,7 @@ async function getNextCard() {
 
 async function approveCurrent() {
   if (!state.currentModerationCard) {
+    setMessage('moderationMsg', 'Сначала возьмите следующую карточку из очереди модерации', true);
     return;
   }
   try {
@@ -1689,12 +2028,18 @@ async function approveCurrent() {
 
 async function declineCurrent() {
   if (!state.currentModerationCard) {
+    setMessage('moderationMsg', 'Сначала возьмите следующую карточку из очереди модерации', true);
     return;
   }
   try {
+    const reasonCode = $('declineReason').value;
+    if (!reasonCode) {
+      setMessage('moderationMsg', 'Выберите причину блокировки перед отклонением товара', true);
+      return;
+    }
     const productId = state.currentModerationCard.product_id;
     const payload = {
-      reason_code: $('declineReason').value,
+      reason_code: reasonCode,
       comment: $('declineComment').value.trim(),
       fields: [],
     };
@@ -1742,16 +2087,40 @@ function bindEvents() {
     }
   });
 
-  $('openCatalogFromDetails').addEventListener('click', clearProductDetails);
-  $('submitReviewBtn').addEventListener('click', submitReview);
-  $('askQuestionBtn').addEventListener('click', askQuestion);
+  $('categorySelect').addEventListener('change', () => {
+    loadProducts();
+  });
+  $('sortSelect').addEventListener('change', () => {
+    loadProducts();
+  });
+
+  $('goPromoCheckoutBtn').addEventListener('click', () => {
+    activateTab('checkout');
+  });
+  const polinaGo = $('polinaBannerGoCheckout');
+  if (polinaGo) {
+    polinaGo.addEventListener('click', () => activateTab('checkout'));
+  }
+  const polinaFill = $('polinaBannerPrefill');
+  if (polinaFill) {
+    polinaFill.addEventListener('click', () => {
+      const input = $('promoCodeInput');
+      if (input) {
+        input.value = 'POLINA';
+      }
+      activateTab('checkout');
+      setMessage('checkoutFlowMsg', 'Код POLINA подставлен — нажмите «Применить промокод».', false);
+    });
+  }
   $('loadQaQueueBtn').addEventListener('click', loadQaModerationQueue);
   $('submitQaAnswerBtn').addEventListener('click', submitQaAnswer);
 
   $('clearCart').addEventListener('click', async () => {
     if (!state.authToken) {
+      setMessage('checkoutMsg', 'Войдите в аккаунт, чтобы очистить корзину', true);
       return;
     }
+    invalidatePromoState();
     await api('/api/v1/cart/', { method: 'DELETE', headers: apiHeaders() });
     await Promise.all([loadCart(), renderCheckoutPreview()]);
   });
@@ -1780,8 +2149,17 @@ async function bootData() {
   if (isModeratorMode()) {
     try {
       await loadBlockingReasons();
-      await loadQaModerationQueue();
-      setMessage('moderationMsg', 'Режим модератора активен');
+    } catch (error) {
+      setMessage('moderationMsg', `Не удалось загрузить причины блокировки: ${error.message}`, true);
+    }
+    await loadQaModerationQueue();
+    try {
+      if (!state.currentModerationCard) {
+        await getNextCard();
+      } else {
+        renderModerationCard(state.currentModerationCard);
+        setMessage('moderationMsg', 'Данные модерации обновлены');
+      }
     } catch (error) {
       setMessage('moderationMsg', error.message, true);
     }
@@ -1819,8 +2197,13 @@ async function boot() {
   hydrateSession();
   wireTabs();
   bindEvents();
+  initTopbarPromoCarousel();
   renderAuthState();
   setRoleVisibility();
+  const hash = (window.location.hash || '').replace(/^#/, '').trim();
+  if (hash) {
+    activateTab(hash);
+  }
   renderAddressBook();
 
   if (state.authToken) {

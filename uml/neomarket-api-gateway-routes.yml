@@ -1,0 +1,108 @@
+# NeoMarket — маршруты API Gateway (nginx) в виде YAML
+# Источник: infra/nginx.conf
+# Публичная точка: http://localhost:8888
+
+gateway:
+  host_port: 8888
+  health:
+    path: /health
+    behavior: static 200 gateway_healthy
+  blocked:
+    - path: /admin
+      response: 403
+
+routes:
+  - prefix: /api/v1/auth/
+    upstream_service: auth
+    upstream_host_port: auth:8000
+    rate_limit_zone: auth_limit
+    path_strip: false
+  - prefix: /api/v1/b2b/
+    upstream_service: b2b
+    upstream_host_port: b2b:8000
+    rate_limit_zone: seller_general
+    requires: [Authorization]
+    path_rewrite: "^/api/v1/b2b/(.*) -> /api/v1/\\1"
+  - prefix: /api/v1/payments/
+    upstream_service: payments
+    upstream_host_port: payments:8000
+    rate_limit_zone: payment_limit
+    requires: [Authorization]
+    path_rewrite: "^/api/v1/payments/(.*) -> /api/v1/\\1"
+  - prefix: /api/v1/orders/
+    upstream_service: orders
+    upstream_host_port: orders:8000
+    rate_limit_zone: user_general
+    forwarded_headers: [X-User-ID]
+    path_rewrite: "^/api/v1/orders/(.*) -> /api/v1/\\1"
+  - prefix: /api/v1/cart/
+    upstream_service: cart
+    upstream_host_port: cart:8000
+    rate_limit_zone: user_general
+    forwarded_headers: [X-User-ID]
+  - prefix: /api/v1/favorites/
+    upstream_service: cart
+    upstream_host_port: cart:8000
+    rate_limit_zone: user_general
+    forwarded_headers: [X-User-ID]
+  - prefix: /api/v1/home/
+    upstream_service: cart
+    upstream_host_port: cart:8000
+    rate_limit_zone: user_general
+    forwarded_headers: [X-User-ID]
+  - prefix: /api/v1/main/
+    upstream_service: cart
+    upstream_host_port: cart:8000
+    rate_limit_zone: user_general
+    forwarded_headers: [X-User-ID]
+  - prefix: /api/v1/collections/
+    upstream_service: cart
+    upstream_host_port: cart:8000
+    rate_limit_zone: user_general
+    forwarded_headers: [X-User-ID]
+  - prefix: /api/v1/banner-events
+    upstream_service: cart
+    upstream_host_port: cart:8000
+    rate_limit_zone: user_general
+    forwarded_headers: [X-User-ID]
+  - prefix: /api/v1/events/product
+    upstream_service: cart
+    upstream_host_port: cart:8000
+    rate_limit_zone: user_general
+    forwarded_headers: [X-User-ID]
+  - prefix: /api/v1/catalog/
+    upstream_service: catalog
+    upstream_host_port: catalog:8000
+    rate_limit_zone: ip_general
+    injects_upstream_headers:
+      X-Service-Key: neomarket-internal-key
+    path_rewrite: "^/api/v1/catalog/(.*) -> /api/v1/\\1"
+  - prefix: /api/v1/reviews/
+    upstream_service: reviews
+    upstream_host_port: reviews:8000
+    rate_limit_zone: ip_general
+    path_rewrite: "^/api/v1/reviews/(.*) -> /api/v1/\\1"
+  - prefix: /api/v1/promo/
+    upstream_service: promo
+    upstream_host_port: promo:8000
+    rate_limit_zone: user_general
+    path_rewrite: "^/api/v1/promo/(.*) -> /api/v1/\\1"
+  - prefix: /api/v1/logistics/
+    upstream_service: logistics
+    upstream_host_port: logistics:8000
+    rate_limit_zone: user_general
+    path_rewrite: "^/api/v1/logistics/(.*) -> /api/v1/\\1"
+  - prefix: /api/v1/moderation/
+    upstream_service: moderation
+    upstream_host_port: moderation:8000
+    rate_limit_zone: ip_strict
+    path_rewrite: "^/api/v1/moderation/(.*) -> /api/v1/\\1"
+  - prefix: /api/v1/antifraud/
+    upstream_service: antifraud
+    upstream_host_port: antifraud:8000
+    rate_limit_zone: payment_limit
+    path_rewrite: "^/api/v1/antifraud/(.*) -> /api/v1/\\1"
+  - prefix: /docs/
+    upstream_service: catalog
+    upstream_host_port: catalog:8000
+    path_rewrite: "^/docs/(.*) -> /api/\\1"
